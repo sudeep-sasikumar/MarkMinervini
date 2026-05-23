@@ -1,35 +1,33 @@
 # Core data
-yfinance==0.2.51
-pandas==2.2.3
-numpy==1.26.4
-requests==2.32.3
+yfinance>=0.2.40
+pandas>=2.0.0,<3.0.0
+numpy>=1.24.0,<2.0.0
+requests>=2.28.0
+lxml>=4.9.0              # required by pandas.read_html (S&P 500 scraping)
 
 # Finnhub client
-finnhub-python==2.4.20
+finnhub-python>=2.4.0
 
-# Database
-# SQLite is built into Python — no extra package needed
+# Database — SQLite is built into Python, no extra package needed
 
 # Scheduling
-APScheduler==3.10.4
-pytz==2024.2
-
-# Telegram
-python-telegram-bot==21.9
+APScheduler>=3.10.0
+pytz>=2023.3
 
 # Dashboard
-streamlit==1.41.1
-plotly==5.24.1
+streamlit>=1.30.0
+plotly>=5.15.0
 
-# AI (Ollama — server runs separately, Python client for HTTP calls)
-ollama==0.4.4
-
-# Backtesting
-vectorbt==0.26.3
+# AI — Ollama HTTP client
+ollama>=0.1.0
 
 # Environment
-python-dotenv==1.0.1
+python-dotenv>=1.0.0
 
 # Utilities
-tqdm==4.67.1
-tenacity==9.0.0
+tqdm>=4.65.0
+tenacity>=8.2.0
+
+# NOTE: vectorbt (backtesting) is intentionally excluded.
+# It has heavy compiled deps (numba/llvmlite) that often fail in CI/ARM64.
+# To enable the backtest tab locally: pip install "vectorbt>=0.28.0"
