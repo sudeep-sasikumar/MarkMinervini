@@ -1,0 +1,10 @@
+.env
+*.pyc
+__pycache__/
+.git/
+.gitignore
+logs/
+data/sepa.db
+*.md
+!CLAUDE.md
+.pytest_cache/

@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  sepa-system:
+    build: .
+    container_name: minervini_sepa
+    restart: always
+    ports:
+      - "8501:8501"          # Streamlit dashboard
+    volumes:
+      - sepa_data:/app/data  # SQLite database persists across restarts
+      - sepa_logs:/app/logs  # Logs persist across restarts
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+      - ALPHA_VANTAGE_KEY=${ALPHA_VANTAGE_KEY}
+      - ACCOUNT_EQUITY_GBP=${ACCOUNT_EQUITY_GBP:-50000}
+      - RISK_PER_TRADE_PCT=${RISK_PER_TRADE_PCT:-0.015}
+      - OLLAMA_URL=http://ollama:11434
+      - DB_PATH=/app/data/sepa.db
+      - LOG_PATH=/app/logs/sepa.log
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    restart: always
+    volumes:
+      - ollama_data:/root/.ollama
+    command: serve
+    # Pull the model on first start (requires internet access)
+    # After first run: docker exec ollama ollama pull llama3.2:3b
+
+volumes:
+  sepa_data:
+  sepa_logs:
+  ollama_data:

@@ -1,0 +1,8 @@
+.env
+*.pyc
+__pycache__/
+data/sepa.db
+logs/
+.pytest_cache/
+.DS_Store
+Thumbs.db
