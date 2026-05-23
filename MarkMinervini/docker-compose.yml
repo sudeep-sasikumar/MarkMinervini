@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   sepa-system:
-    build: .
+    image: ghcr.io/sudeep-sasikumar/markminervini:latest
     container_name: minervini_sepa
     restart: always
     ports:
@@ -35,8 +33,6 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     command: serve
-    # Pull the model on first start (requires internet access)
-    # After first run: docker exec ollama ollama pull llama3.2:3b
 
 volumes:
   sepa_data:
