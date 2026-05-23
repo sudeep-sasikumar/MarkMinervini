@@ -83,8 +83,9 @@ VIX_CAUTION = 25                # position sizes 50%
 VIX_DANGER = 35                 # suppress all signals
 
 BREADTH_BULL = 60               # % S&P 500 above 200-SMA = healthy
-BREADTH_MIXED_LOW = 40          # below = mixed
-BREADTH_BEAR = 20               # below = bear (suppress)
+BREADTH_WEAK = 40               # below = mixed/weak (reduce sizes)
+BREADTH_BEAR = 20               # below = bear (suppress all signals)
+BREADTH_MIXED_LOW = BREADTH_WEAK  # alias kept for backwards compat
 
 # ---------------------------------------------------------------------------
 # Earnings Safety (Section 8)
@@ -109,7 +110,7 @@ ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = "llama3.2:3b"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
 # Finnhub rate limit: max 60/min on free tier; use 55 as safe ceiling
 FINNHUB_MAX_CALLS_PER_MIN = 55
@@ -162,4 +163,20 @@ SECTOR_ETF_MAP = {
     "Real Estate": "XLRE",
     "Utilities": "XLU",
     "Communication Services": "XLC",
+}
+
+# yfinance .info["sector"] can return different names than the keys above.
+# This map normalises yfinance sector names → canonical SECTOR_ETF_MAP keys.
+SECTOR_NAME_ALIASES = {
+    "Healthcare": "Health Care",
+    "Financial Services": "Financials",
+    "Consumer Cyclical": "Consumer Discretionary",
+    "Consumer Defensive": "Consumer Staples",
+    "Basic Materials": "Materials",
+    "Communication Services": "Communication Services",  # already matches
+    "Technology": "Technology",
+    "Industrials": "Industrials",
+    "Energy": "Energy",
+    "Real Estate": "Real Estate",
+    "Utilities": "Utilities",
 }

@@ -31,17 +31,35 @@ _OLLAMA_AVAILABLE: Optional[bool] = None  # cached after first check
 # ---------------------------------------------------------------------------
 
 def _check_ollama() -> bool:
+    """
+    Check that Ollama is reachable AND the configured model is available.
+    Caches result; call is_ai_online() to force a recheck.
+    """
     global _OLLAMA_AVAILABLE
     if _OLLAMA_AVAILABLE is not None:
         return _OLLAMA_AVAILABLE
     try:
         resp = requests.get(f"{settings.OLLAMA_URL}/api/tags", timeout=5)
-        _OLLAMA_AVAILABLE = resp.status_code == 200
-    except Exception:
+        if resp.status_code != 200:
+            raise ConnectionError(f"HTTP {resp.status_code}")
+        # Confirm the model is actually pulled
+        tags = resp.json()
+        models = [m.get("name", "") for m in tags.get("models", [])]
+        model_available = any(
+            settings.OLLAMA_MODEL in m or m.startswith(settings.OLLAMA_MODEL.split(":")[0])
+            for m in models
+        )
+        if not model_available:
+            logger.warning(
+                "Ollama reachable but model '%s' not found (available: %s) — AI offline",
+                settings.OLLAMA_MODEL, models
+            )
+            _OLLAMA_AVAILABLE = False
+        else:
+            _OLLAMA_AVAILABLE = True
+    except Exception as exc:
+        logger.warning("Ollama availability check failed (%s) — AI analysis skipped", exc)
         _OLLAMA_AVAILABLE = False
-    if not _OLLAMA_AVAILABLE:
-        logger.warning("Ollama not reachable at %s — AI analysis will be skipped",
-                       settings.OLLAMA_URL)
     return _OLLAMA_AVAILABLE
 
 

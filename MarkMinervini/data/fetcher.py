@@ -122,6 +122,7 @@ def fetch_ohlcv_batch(tickers: list[str], period: str = "2y") -> dict[str, pd.Da
     """
     Fetch OHLCV for a list of tickers in a single yfinance bulk download.
     Much faster than calling fetch_ohlcv() in a loop for large universes.
+    Falls back to per-ticker fetch for any tickers missing from the bulk download.
     Returns {ticker: DataFrame} for tickers with >= 200 rows.
     """
     logger.info("Bulk downloading OHLCV for %d tickers", len(tickers))
@@ -153,6 +154,19 @@ def fetch_ohlcv_batch(tickers: list[str], period: str = "2y") -> dict[str, pd.Da
 
     logger.info("Bulk download complete: %d/%d tickers with sufficient history",
                 len(result), len(tickers))
+
+    # Fallback: retry missing tickers individually via single-ticker fetch
+    missing = [t for t in tickers if t not in result]
+    if missing:
+        logger.info("Retrying %d missing tickers individually", len(missing))
+        for ticker in missing:
+            try:
+                df = fetch_ohlcv(ticker, period)
+                if df is not None and len(df) >= 200:
+                    result[ticker] = df
+            except Exception as exc:
+                logger.debug("Single-ticker fallback failed for %s: %s", ticker, exc)
+
     return result
 
 
@@ -172,6 +186,50 @@ def fetch_latest_price(ticker: str) -> Optional[float]:
 def fetch_spy_ohlcv(period: str = "2y") -> Optional[pd.DataFrame]:
     """Convenience: fetch SPY for regime and RS calculations."""
     return fetch_ohlcv("SPY", period)
+
+
+def fetch_intraday_ohlcv(ticker: str, interval: str = "5m") -> Optional[pd.DataFrame]:
+    """
+    Fetch intraday OHLCV data for a ticker (today's session).
+    Uses yfinance with a 1-day period and 5-minute intervals.
+    Returns DataFrame or None. No caching — always fresh for intraday use.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        df = t.history(period="1d", interval=interval, auto_adjust=True)
+        if df.empty:
+            return None
+        df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        df.sort_index(inplace=True)
+        return df
+    except Exception as exc:
+        logger.debug("fetch_intraday_ohlcv failed for %s: %s", ticker, exc)
+        return None
+
+
+def fetch_gbpusd() -> float:
+    """
+    Fetch current GBP/USD FX rate via yfinance.
+    Returns the rate (e.g. 1.27 means £1 = $1.27).
+    Falls back to 1.27 if unavailable (reasonable approximation).
+    Cached for 1 hour.
+    """
+    cache_key = "fx:gbpusd"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return float(cached)
+    try:
+        gbpusd = yf.Ticker("GBPUSD=X")
+        hist = gbpusd.history(period="5d")
+        if hist.empty:
+            raise ValueError("Empty GBPUSD history")
+        rate = float(hist["Close"].iloc[-1])
+        cache_set(cache_key, rate, ttl_seconds=3600)
+        return rate
+    except Exception as exc:
+        logger.warning("fetch_gbpusd failed (%s) — using fallback rate 1.27", exc)
+        return 1.27  # reasonable fallback; avoids hard crash
 
 
 def fetch_vix() -> Optional[float]:

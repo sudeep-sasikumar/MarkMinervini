@@ -3,12 +3,12 @@ Relative Strength (RS) rank calculator — Minervini-style, NOT RSI.
 
 RS = percentile rank of 12-month price performance across the entire universe.
 rs_raw  = (adjusted_close_today / adjusted_close_252_days_ago) - 1
-rs_rating = (rank / total) * 100   (higher = stronger)
+rs_rating = (rank / total) * 100   (higher = stronger, 100 = universe leader)
 
 RS Comparative Line = stock_close / SPY_close
 Flags "RS LINE NEW HIGH" when the RS line hits a 52-week high while price has not.
 
-Vectorised pandas operations — no per-ticker loops.
+Vectorised via pd.concat for the core 252-day return — no per-ticker loops.
 Target: < 30 seconds for 1,500 tickers.
 """
 
@@ -27,7 +27,7 @@ def compute_rs_ratings(
     price_data: dict[str, pd.DataFrame],
 ) -> pd.DataFrame:
     """
-    Compute RS ratings for all tickers in price_data.
+    Compute RS ratings for all tickers in price_data using vectorised operations.
 
     Args:
         price_data: {ticker: OHLCV DataFrame} from fetch_ohlcv_batch
@@ -36,35 +36,35 @@ def compute_rs_ratings(
         DataFrame with columns [ticker, rs_raw, rs_rating]
         sorted descending by rs_rating.
     """
-    records = []
-    for ticker, df in price_data.items():
-        if len(df) < 252:
-            continue
-        try:
-            close = df["Close"]
-            price_now = float(close.iloc[-1])
-            price_252 = float(close.iloc[-252])
-            if price_252 == 0:
-                continue
-            rs_raw = (price_now / price_252) - 1.0
-            records.append({"ticker": ticker, "rs_raw": rs_raw})
-        except Exception as exc:
-            logger.debug("RS calc failed for %s: %s", ticker, exc)
-
-    if not records:
+    # Build a single wide DataFrame of adjusted closes
+    eligible = {t: df["Close"] for t, df in price_data.items() if len(df) >= 252}
+    if not eligible:
         return pd.DataFrame(columns=["ticker", "rs_raw", "rs_rating"])
 
-    df_rs = pd.DataFrame(records)
+    closes = pd.concat(eligible, axis=1)
+
+    # Vectorised: latest close and close 252 days ago — no loop
+    price_now = closes.iloc[-1]
+    price_252 = closes.iloc[-252]
+
+    # Avoid division by zero
+    valid_mask = (price_252 > 0) & price_now.notna() & price_252.notna()
+    rs_raw = (price_now[valid_mask] / price_252[valid_mask]) - 1.0
+
+    if rs_raw.empty:
+        return pd.DataFrame(columns=["ticker", "rs_raw", "rs_rating"])
+
+    df_rs = rs_raw.reset_index()
+    df_rs.columns = ["ticker", "rs_raw"]
     df_rs.sort_values("rs_raw", ascending=False, inplace=True)
     df_rs.reset_index(drop=True, inplace=True)
+
     total = len(df_rs)
-    # Rank: position 0 = highest rs_raw = rs_rating 100
+    # Rank: position 0 = strongest = rs_rating 100; last = weakest ≈ 0
     df_rs["rs_rating"] = ((total - df_rs.index) / total * 100).round(1)
 
-    logger.info("RS computed for %d tickers (threshold ≥%d: %d stocks)",
-                total,
-                70,
-                (df_rs["rs_rating"] >= 70).sum())
+    logger.info("RS computed for %d tickers (threshold ≥70: %d stocks)",
+                total, (df_rs["rs_rating"] >= 70).sum())
     return df_rs
 
 
@@ -93,11 +93,15 @@ def check_rs_line_new_high(
     """
     Return True if the RS line made a new 52-week high in the last `recent_days`
     while the stock price itself did NOT make a new 52-week high.
-    This is Minervini's most powerful early signal.
+    This is Minervini's most powerful early-entry signal.
+
+    Fix: only requires len(rs_line) >= lookback_days (not lookback + recent).
+    The recent_days window is already within the lookback_days window.
     """
     try:
         rs_line = compute_rs_line(stock_df, spy_df)
-        if len(rs_line) < lookback_days + recent_days:
+        # Require enough history for the 52-week lookback
+        if len(rs_line) < lookback_days:
             return False
 
         rs_window = rs_line.iloc[-lookback_days:]

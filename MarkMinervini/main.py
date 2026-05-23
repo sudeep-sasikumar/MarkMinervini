@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, time as dtime
 
 # ---------------------------------------------------------------------------
 # Logging setup — must happen before any other imports that use logger
@@ -286,19 +286,47 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
 def run_intraday_check():
     """
     Intraday check (every 15 min, 13:30–21:00 BST).
-    Re-check watchlist stocks: if today's close > pivot AND volume >= 1.4x avg → alert.
+
+    Uses real intraday 5-minute bars (not daily bars) to detect breakouts.
+    Volume is projected to full-day equivalent using elapsed session time,
+    then compared to 50-day average volume to validate the breakout.
+
+    Guard: exits early if called before 13:30 or after 21:00 BST.
     """
-    logger.info("--- Intraday check ---")
+    import pytz
+    BST = pytz.timezone("Europe/London")
+    now_bst = datetime.now(BST).time()
+
+    # Market-hours guard — intraday check only valid 13:30–21:00 BST
+    if now_bst < dtime(13, 30) or now_bst > dtime(21, 0):
+        logger.debug("Intraday check called outside market hours (%s BST) — skipping", now_bst)
+        return
+
+    logger.info("--- Intraday check @ %s BST ---", now_bst)
     try:
         from database.db import get_connection
-        from data.fetcher import fetch_ohlcv
-        from patterns.vcp_detector import detect_vcp
+        from data.fetcher import fetch_ohlcv, fetch_intraday_ohlcv
 
         conn = get_connection()
         watchlist = conn.execute(
-            "SELECT ticker, pivot_price FROM watchlist WHERE vcp_score >= 80"
+            "SELECT ticker, pivot_price FROM watchlist WHERE vcp_score >= 70"
         ).fetchall()
         conn.close()
+
+        # Compute elapsed fraction of US session (13:30–21:00 BST = 7.5 hours)
+        market_open_bst = dtime(13, 30)
+        market_close_bst = dtime(21, 0)
+        session_total_secs = (
+            datetime.combine(date.today(), market_close_bst)
+            - datetime.combine(date.today(), market_open_bst)
+        ).total_seconds()
+        elapsed_secs = max(60, (
+            datetime.combine(date.today(), now_bst)
+            - datetime.combine(date.today(), market_open_bst)
+        ).total_seconds())
+        fraction_elapsed = min(1.0, elapsed_secs / session_total_secs)
+
+        today = date.today().isoformat()
 
         for row in watchlist:
             ticker = row["ticker"]
@@ -306,21 +334,32 @@ def run_intraday_check():
             if not pivot:
                 continue
             try:
-                df = fetch_ohlcv(ticker, period="3mo")
-                if df is None or len(df) < 20:
+                # Real intraday 5-minute bars for current price and volume
+                intraday_df = fetch_intraday_ohlcv(ticker, interval="5m")
+                if intraday_df is None or len(intraday_df) < 3:
                     continue
 
-                today_close = float(df["Close"].iloc[-1])
-                today_vol = float(df["Volume"].iloc[-1])
-                avg_vol_50 = float(df["Volume"].iloc[-50:].mean()) if len(df) >= 50 else float(df["Volume"].mean())
+                current_price = float(intraday_df["Close"].iloc[-1])
+                intraday_vol = float(intraday_df["Volume"].sum())
 
-                # Check for intraday breakout
-                if today_close > pivot and today_vol >= avg_vol_50 * settings.BREAKOUT_VOLUME_RATIO:
-                    logger.info("INTRADAY BREAKOUT: %s @ $%.2f (vol %.1fx avg)",
-                                ticker, today_close, today_vol / avg_vol_50)
-                    # Full VCP re-run to get current score and trigger alert if warranted
-                    # (avoids sending duplicate alerts — check if already sent today)
-                    today = date.today().isoformat()
+                # Project intraday volume to full-day equivalent
+                projected_vol = intraday_vol / fraction_elapsed if fraction_elapsed > 0 else 0
+
+                # 50-day average volume from daily data for comparison
+                daily_df = fetch_ohlcv(ticker, period="3mo")
+                if daily_df is None or len(daily_df) < 20:
+                    continue
+                avg_vol_50 = float(daily_df["Volume"].iloc[-50:].mean()) if len(daily_df) >= 50 else float(daily_df["Volume"].mean())
+
+                volume_pace_ratio = projected_vol / avg_vol_50 if avg_vol_50 > 0 else 0
+
+                # Breakout condition: price > pivot AND projected volume >= 1.4× avg
+                if current_price > pivot and volume_pace_ratio >= settings.BREAKOUT_VOLUME_RATIO:
+                    logger.info(
+                        "INTRADAY BREAKOUT: %s @ $%.2f (pivot=$%.2f, vol pace=%.1fx avg)",
+                        ticker, current_price, pivot, volume_pace_ratio
+                    )
+                    # Check not already alerted today
                     conn2 = get_connection()
                     already_alerted = conn2.execute(
                         "SELECT id FROM signals WHERE ticker=? AND date=? AND telegram_sent=1",
@@ -328,8 +367,8 @@ def run_intraday_check():
                     ).fetchone()
                     conn2.close()
                     if not already_alerted:
-                        run_full_scan()  # re-run will handle the alert properly
-                        break  # avoid cascade of re-runs in same 15-min window
+                        run_full_scan()  # full scan handles alert formatting and DB save
+                        break  # one re-scan per intraday window to avoid cascades
 
             except Exception as exc:
                 logger.debug("Intraday check error for %s: %s", ticker, exc)
@@ -357,6 +396,19 @@ def _get_ticker_sector(ticker: str) -> dict:
         return result
     except Exception:
         return {"name": ticker, "sector": "Unknown"}
+
+
+def _write_heartbeat() -> None:
+    """Write a scanner heartbeat to system_status so the dashboard can detect stale scanner."""
+    from database.db import db_session
+    try:
+        with db_session() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_status(key, value, updated_at) "
+                "VALUES('scanner_heartbeat', 'alive', CURRENT_TIMESTAMP)"
+            )
+    except Exception as exc:
+        logger.debug("Heartbeat write failed: %s", exc)
 
 
 def _log_scan_funnel(funnel: dict, elapsed: float) -> None:
@@ -415,10 +467,11 @@ def main():
     logger.info("Running initial scan on startup...")
     run_full_scan()
 
-    # Keep alive
+    # Keep alive — write heartbeat every 60s so dashboard can detect stale scanner
     try:
         while True:
             time.sleep(60)
+            _write_heartbeat()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutdown signal received — stopping scheduler")
         scheduler.shutdown(wait=False)

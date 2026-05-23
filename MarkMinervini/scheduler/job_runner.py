@@ -108,6 +108,8 @@ def create_scheduler() -> BackgroundScheduler:
     )
 
     # --- Intraday: every 15 minutes, 13:30–21:00 BST Mon–Fri ---
+    # hour="13-20" fires from 13:00 but run_intraday_check() has its own
+    # 13:30 guard so the 13:00 and 13:15 firings are no-ops.
     scheduler.add_job(
         job_intraday_check,
         CronTrigger(
@@ -226,6 +228,10 @@ def job_morning_briefing():
             if status["action"] == "block":
                 earnings_blocked.append(ticker)
 
+        # Fetch live economic events for this morning's briefing
+        from data.economic_calendar import get_high_impact_events
+        economic_events = get_high_impact_events(days_ahead=2)
+
         msg = format_morning_briefing(
             regime=regime,
             watchlist=watch_list,
@@ -233,7 +239,7 @@ def job_morning_briefing():
             earnings_blocked=earnings_blocked,
             sector_leaders=leaders,
             weak_sectors=weak_sectors,
-            economic_events=[],
+            economic_events=economic_events,
         )
         send_message(msg)
     except Exception as exc:
@@ -297,8 +303,15 @@ def job_weekly():
         results = []
         for row in rows:
             ticker = row["ticker"]
-            # Simplified: would normally fetch SEC EDGAR text
-            ai = analyse_management_quality(ticker, "Annual report data pending SEC fetch.")
+            # Fetch SEC EDGAR data for management quality analysis
+            try:
+                from data.sec_edgar import get_sec_summary
+                sec_data = get_sec_summary(ticker)
+                report_text = sec_data.get("summary_text", "SEC data unavailable")
+            except Exception as sec_exc:
+                logger.debug("SEC fetch failed for %s: %s", ticker, sec_exc)
+                report_text = "SEC data unavailable — manual review recommended"
+            ai = analyse_management_quality(ticker, report_text)
             results.append(f"  {ticker}: {ai.get('rating', 'N/A')} — {ai.get('rationale', '')[:40]}")
 
         if results:

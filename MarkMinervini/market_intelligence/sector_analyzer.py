@@ -60,16 +60,31 @@ def fetch_sector_performance() -> dict[str, dict]:
     return result
 
 
+def normalise_sector(sector: str) -> str:
+    """
+    Normalise a yfinance sector name to the canonical key used in SECTOR_ETF_MAP.
+    e.g. "Healthcare" → "Health Care", "Consumer Cyclical" → "Consumer Discretionary"
+    Falls back to the original value if no alias exists.
+    """
+    return settings.SECTOR_NAME_ALIASES.get(sector, sector)
+
+
 def get_sector_stage2_status(sector: str) -> bool:
     """
     Return True if the sector ETF is in Stage 2 (passes all 8 Trend Template criteria).
     Used as an anti-false-positive gate before generating alerts.
+    Normalises yfinance sector names before lookup to prevent false mismatches.
     """
+    canonical = normalise_sector(sector)
     perf = fetch_sector_performance()
-    sector_data = perf.get(sector)
+    sector_data = perf.get(canonical)
     if sector_data is None:
-        logger.debug("No sector data for '%s' — allowing by default", sector)
-        return True  # conservative: allow if unknown
+        logger.warning(
+            "No sector ETF data for '%s' (canonical: '%s') — blocking signal (conservative)",
+            sector, canonical
+        )
+        # Conservative: unknown sector → block. Prevents bad signals from unmapped sectors.
+        return False
     return sector_data.get("stage2", False)
 
 

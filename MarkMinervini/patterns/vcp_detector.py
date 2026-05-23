@@ -1,21 +1,20 @@
 """
 Volatility Contraction Pattern (VCP) detector — Section 6.
-Produces a score 0–100. Only scores >= 80 generate alerts.
-Every step is commented per the master prompt specification.
+Produces a score 0–100. Only scores >= 80 AND confirmed breakout generate alerts.
 
 Algorithm (12 steps):
   1.  Confirm Stage 2 uptrend (Trend Template must pass)
-  2.  Confirm prior advance >= 30%
+  2.  Confirm prior advance >= 30% (pre-base window, not overlapping base)
   3.  Find the base (60–120 trading days back from today)
-  4.  Identify contractions using a 5-day smoothing window
+  4.  Identify contractions using swing-point high/low detection
   5.  Validate contraction series (tightening, min 2 contractions)
   6.  Validate volume pattern (declining volume across contractions)
   7.  Evaluate pivot zone (last 5–15 days, ATR collapse)
   8.  Volume dry-up in final 5 days
-  9.  No wide-and-loose bars in pivot zone
+  9.  No wide-and-loose bars in pivot zone (>3% daily range vs High)
   10. Compute entry, stop, targets
   11. Gap-up filter
-  12. Breakout check (today's session)
+  12. Breakout check (today's session) — REQUIRED for alert=True
 """
 
 import logging
@@ -70,11 +69,12 @@ def detect_vcp(
     Returns:
         {
           "ticker": str,
-          "vcp_score": int,          # 0–100
+          "vcp_score": int,           # 0–100
           "grade": str,
-          "alert": bool,             # True if score >= 80 AND all gates pass
-          "risk_valid": bool,        # False if stop > 8%
-          "contractions": list,      # [{depth_pct, vol_avg}, ...]
+          "alert": bool,              # True if score >= 80 AND breakout confirmed
+          "watchlist_candidate": bool,# True if score >= 70 (near-pivot setup)
+          "risk_valid": bool,         # False if stop > 8%
+          "contractions": list,       # [{depth_pct, vol_avg}, ...]
           "pivot_price": float,
           "entry_price": float,
           "stop_price": float,
@@ -84,7 +84,7 @@ def detect_vcp(
           "base_days": int,
           "breakout_confirmed": bool,
           "rejection_reason": str | None,
-          "steps": dict,             # per-step details for dashboard
+          "steps": dict,              # per-step details for dashboard
         }
     """
     base_result: dict = {
@@ -92,6 +92,7 @@ def detect_vcp(
         "vcp_score": 0,
         "grade": GRADE_NONE,
         "alert": False,
+        "watchlist_candidate": False,
         "risk_valid": False,
         "contractions": [],
         "pivot_price": None,
@@ -122,17 +123,30 @@ def detect_vcp(
 
     # ------------------------------------------------------------------
     # Step 2 — Prior advance >= 30%
+    # Correctly measures advance BEFORE the base started, not including
+    # the base itself.
     # ------------------------------------------------------------------
-    lookback = min(settings.MAX_BASE_TRADING_DAYS, len(df) - 10)
-    window = df.iloc[-(lookback + 60):].copy() if len(df) > lookback + 60 else df.copy()
-    pre_base_low = float(window["Low"].iloc[:lookback // 2].min())
-    peak_before_base = float(window["High"].iloc[:lookback].max())
+    base_window = df.iloc[-settings.MAX_BASE_TRADING_DAYS:].copy()
+    peak_pos = int(base_window["Close"].values.argmax())
+    base_start_idx = len(df) - settings.MAX_BASE_TRADING_DAYS + peak_pos
 
-    if pre_base_low == 0:
-        base_result["rejection_reason"] = "Step 2: Price data error"
+    # Pre-base window: look back up to 6 months before the base peak
+    pre_base_lookback = min(126, base_start_idx)
+    pre_base_start = max(0, base_start_idx - pre_base_lookback)
+    pre_base_df = df.iloc[pre_base_start:base_start_idx]
+
+    if len(pre_base_df) < 20:
+        base_result["rejection_reason"] = "Step 2: Insufficient pre-base history to confirm prior advance"
         return base_result
 
-    prior_advance_pct = (peak_before_base / pre_base_low - 1) * 100
+    pre_base_low = float(pre_base_df["Low"].min())
+    base_peak = float(base_window["Close"].max())
+
+    if pre_base_low == 0:
+        base_result["rejection_reason"] = "Step 2: Price data error (zero low)"
+        return base_result
+
+    prior_advance_pct = (base_peak / pre_base_low - 1) * 100
     steps["prior_advance_pct"] = round(prior_advance_pct, 1)
 
     if prior_advance_pct < settings.MIN_PRIOR_ADVANCE:
@@ -143,14 +157,8 @@ def detect_vcp(
         return base_result
 
     # ------------------------------------------------------------------
-    # Step 3 — Find the base (highest close in last 60–120 days = peak)
+    # Step 3 — Find the base (from peak close to today)
     # ------------------------------------------------------------------
-    base_window = df.iloc[-settings.MAX_BASE_TRADING_DAYS:].copy()
-    peak_idx = int(base_window["Close"].idxmax().to_pydatetime().timestamp()
-                   if hasattr(base_window["Close"].idxmax(), 'to_pydatetime')
-                   else 0)
-    # Use positional index instead of timestamp for robustness
-    peak_pos = int(base_window["Close"].values.argmax())
     base_df = base_window.iloc[peak_pos:].copy()
     base_days = len(base_df)
     steps["base_days"] = base_days
@@ -164,14 +172,14 @@ def detect_vcp(
         return base_result
 
     # ------------------------------------------------------------------
-    # Step 4 — Identify contractions using 5-day smoothing
+    # Step 4 — Identify contractions using swing-point detection
     # ------------------------------------------------------------------
     contractions = _identify_contractions(base_df)
     steps["num_contractions"] = len(contractions)
     steps["contractions"] = contractions
 
     # ------------------------------------------------------------------
-    # Step 5 — Validate contraction series
+    # Step 5 — Validate contraction series (must tighten)
     # ------------------------------------------------------------------
     if len(contractions) < settings.MIN_CONTRACTIONS:
         base_result["rejection_reason"] = (
@@ -180,18 +188,18 @@ def detect_vcp(
         base_result["steps"] = steps
         return base_result
 
-    # Each contraction must be < previous * 0.85
     valid_series = True
     for i in range(1, len(contractions)):
         if contractions[i]["depth_pct"] >= contractions[i - 1]["depth_pct"]:
-            # Hard disqualifier: wider than previous
+            # Hard disqualifier: wider than previous = not a VCP
             base_result["rejection_reason"] = (
-                f"Step 5: Contraction {i+1} wider than {i} — not a VCP"
+                f"Step 5: Contraction {i+1} ({contractions[i]['depth_pct']:.1f}%) wider "
+                f"than contraction {i} ({contractions[i-1]['depth_pct']:.1f}%) — not a VCP"
             )
             base_result["steps"] = steps
             return base_result
         if contractions[i]["depth_pct"] > contractions[i - 1]["depth_pct"] * settings.CONTRACTION_TIGHTENING_RATIO:
-            valid_series = False  # not tight enough, but not disqualifier
+            valid_series = False  # not tight enough, but not a hard disqualifier
 
     if len(contractions) >= 3:
         score += 25
@@ -214,7 +222,6 @@ def detect_vcp(
     pivot_days = min(settings.PIVOT_ZONE_DAYS, len(base_df))
     pivot_zone = base_df.iloc[-pivot_days:]
 
-    atr14 = _compute_atr(base_df, 14)
     atr50 = _compute_atr(base_df, min(50, len(base_df)))
     atr_pivot = _compute_atr(pivot_zone, min(14, len(pivot_zone)))
 
@@ -239,9 +246,10 @@ def detect_vcp(
 
     # ------------------------------------------------------------------
     # Step 9 — No wide-and-loose bars in pivot zone (last 5 days)
+    # Use High as denominator (correct Minervini definition)
     # ------------------------------------------------------------------
     last5 = base_df.iloc[-5:]
-    daily_ranges = ((last5["High"] - last5["Low"]) / last5["Low"]).values
+    daily_ranges = ((last5["High"] - last5["Low"]) / last5["High"]).values
     wide_bars = int((daily_ranges > settings.WIDE_LOOSE_BAR_PCT).sum())
     steps["wide_loose_bars"] = wide_bars
     if wide_bars > 0:
@@ -306,6 +314,7 @@ def detect_vcp(
 
     # ------------------------------------------------------------------
     # Step 12 — Breakout confirmation
+    # REQUIRED for alert=True — price must close > pivot on >= 1.4× volume
     # ------------------------------------------------------------------
     today_close = float(df["Close"].iloc[-1])
     today_vol = float(df["Volume"].iloc[-1])
@@ -318,13 +327,12 @@ def detect_vcp(
     base_result["breakout_confirmed"] = breakout
 
     # Anti-false-positive liquidity gates
-    avg_vol_50d = avg_vol_50
-    avg_dollar_vol = avg_vol_50d * float(df["Close"].iloc[-50:].mean())
+    avg_dollar_vol = avg_vol_50 * float(df["Close"].iloc[-50:].mean())
     price = float(df["Close"].iloc[-1])
 
-    if avg_vol_50d < settings.MIN_DAILY_VOLUME:
+    if avg_vol_50 < settings.MIN_DAILY_VOLUME:
         base_result["rejection_reason"] = (
-            f"Liquidity gate: avg volume {avg_vol_50d:,.0f} < {settings.MIN_DAILY_VOLUME:,}"
+            f"Liquidity gate: avg volume {avg_vol_50:,.0f} < {settings.MIN_DAILY_VOLUME:,}"
         )
         base_result["vcp_score"] = score
         base_result["grade"] = grade_vcp(score)
@@ -350,15 +358,25 @@ def detect_vcp(
         base_result["steps"] = steps
         return base_result
 
-    # Final score and alert gate
+    # Final score clamped to [0, 100]
     score = max(0, min(100, score))
     base_result["vcp_score"] = score
     base_result["grade"] = grade_vcp(score)
     base_result["contractions"] = contractions
     base_result["steps"] = steps
 
-    if score >= settings.VCP_SCORE_MIN and risk_valid:
+    # Watchlist candidate: score >= 70 and risk valid (setup forming, not yet broken out)
+    base_result["watchlist_candidate"] = score >= 70 and risk_valid
+
+    # ALERT requires BOTH score >= 80 AND confirmed breakout
+    if score >= settings.VCP_SCORE_MIN and risk_valid and breakout:
         base_result["alert"] = True
+    elif score >= settings.VCP_SCORE_MIN and risk_valid and not breakout:
+        base_result["rejection_reason"] = (
+            f"No confirmed breakout: close ${today_close:.2f} <= pivot ${pivot_price:.2f} "
+            f"or volume {today_vol:,.0f} < {avg_vol_50 * settings.BREAKOUT_VOLUME_RATIO:,.0f} "
+            f"(1.4× avg). Add to watchlist — await breakout."
+        )
     elif score < settings.VCP_SCORE_MIN:
         base_result["rejection_reason"] = (
             f"VCP score {score} < minimum {settings.VCP_SCORE_MIN}"
@@ -373,34 +391,85 @@ def detect_vcp(
 
 def _identify_contractions(df: pd.DataFrame, window: int = 5) -> list[dict]:
     """
-    Identify price contractions in a base using a smoothing window.
-    A contraction = local high to local low depth as a percentage.
+    Identify VCP contractions using swing-point high/low detection.
+
+    Algorithm:
+      1. Smooth prices with a rolling window to reduce noise
+      2. Find pivot highs (local maxima) and pivot lows (local minima)
+      3. Pair each pivot high with the NEXT pivot low → one contraction leg
+      4. Deduplicate to avoid overlapping contractions
+      5. Return sorted by time, max 5 contractions
     """
-    # Smooth with a rolling window to reduce noise
-    smoothed_high = df["High"].rolling(window, min_periods=1).max()
-    smoothed_low = df["Low"].rolling(window, min_periods=1).min()
-
-    contractions = []
     n = len(df)
-    step = max(window, n // 8)  # segment the base into ~8 sections max
+    if n < window * 4:
+        return []
 
-    for start in range(0, n - window, step):
-        end = min(start + step * 2, n)
-        seg_high = float(smoothed_high.iloc[start:end].max())
-        seg_low = float(smoothed_low.iloc[start:end].min())
-        if seg_high == 0:
+    smoothed_high = df["High"].rolling(window, min_periods=1).mean()
+    smoothed_low = df["Low"].rolling(window, min_periods=1).mean()
+
+    half = max(2, window // 2)
+
+    # Find pivot highs: points that are local maxima within ±half bars
+    pivot_highs: list[tuple[int, float]] = []
+    for i in range(half, n - half):
+        window_vals = smoothed_high.iloc[i - half:i + half + 1]
+        if smoothed_high.iloc[i] >= float(window_vals.max()) - 1e-9:
+            pivot_highs.append((i, float(smoothed_high.iloc[i])))
+
+    # Find pivot lows: points that are local minima within ±half bars
+    pivot_lows: list[tuple[int, float]] = []
+    for i in range(half, n - half):
+        window_vals = smoothed_low.iloc[i - half:i + half + 1]
+        if smoothed_low.iloc[i] <= float(window_vals.min()) + 1e-9:
+            pivot_lows.append((i, float(smoothed_low.iloc[i])))
+
+    # Deduplicate: keep only pivots at least `window` bars apart
+    pivot_highs = _deduplicate_pivots(pivot_highs, min_gap=window)
+    pivot_lows = _deduplicate_pivots(pivot_lows, min_gap=window)
+
+    if not pivot_highs or not pivot_lows:
+        return []
+
+    # Pair each pivot high with the NEXT pivot low
+    contractions = []
+    used_low_indices = set()
+    for ph_idx, ph_price in pivot_highs:
+        # Find the earliest pivot low after this high that hasn't been used
+        next_lows = [(li, lp) for li, lp in pivot_lows if li > ph_idx and li not in used_low_indices]
+        if not next_lows:
             continue
-        depth_pct = (seg_high - seg_low) / seg_high * 100
-        avg_vol = float(df["Volume"].iloc[start:end].mean())
+        pl_idx, pl_price = min(next_lows, key=lambda x: x[0])
+        if ph_price == 0:
+            continue
+        depth_pct = (ph_price - pl_price) / ph_price * 100
+        # Only meaningful contractions (> 2% depth to filter noise)
+        if depth_pct < 2.0:
+            continue
+        seg_start = ph_idx
+        seg_end = min(pl_idx + 1, n)
+        avg_vol = float(df["Volume"].iloc[seg_start:seg_end].mean()) if seg_end > seg_start else float(df["Volume"].iloc[ph_idx])
         contractions.append({
             "depth_pct": round(depth_pct, 1),
             "vol_avg": round(avg_vol, 0),
-            "start": start,
-            "end": end,
+            "start": ph_idx,
+            "end": pl_idx,
         })
+        used_low_indices.add(pl_idx)
 
-    # Keep at most 5 contractions
+    # Sort chronologically and keep at most 5
+    contractions.sort(key=lambda x: x["start"])
     return contractions[:5]
+
+
+def _deduplicate_pivots(pivots: list, min_gap: int) -> list:
+    """Remove pivot points that are too close together (< min_gap bars apart)."""
+    if not pivots:
+        return []
+    result = [pivots[0]]
+    for pivot in pivots[1:]:
+        if pivot[0] - result[-1][0] >= min_gap:
+            result.append(pivot)
+    return result
 
 
 def _check_volume_declining(contractions: list[dict]) -> str:
@@ -450,9 +519,12 @@ if __name__ == "__main__":
     df = fetch_ohlcv("NVDA", "2y")
     result = detect_vcp("NVDA", df, trend_template_passes=True, rs_line_new_high=False)
     print(f"vcp_detector.py: NVDA score={result['vcp_score']}, grade={result['grade']}")
-    print(f"  alert={result['alert']}, risk_valid={result['risk_valid']}")
+    print(f"  alert={result['alert']}, watchlist_candidate={result['watchlist_candidate']}")
+    print(f"  risk_valid={result['risk_valid']}, breakout={result['breakout_confirmed']}")
     if result["pivot_price"]:
         print(f"  pivot=${result['pivot_price']}, entry=${result['entry_price']}, "
               f"stop=${result['stop_price']} ({result['stop_pct']:.1f}%)")
+    print(f"  contractions={len(result['contractions'])}: "
+          + ", ".join(f"{c['depth_pct']:.1f}%" for c in result["contractions"]))
     if result["rejection_reason"]:
-        print(f"  rejected: {result['rejection_reason']}")
+        print(f"  info: {result['rejection_reason']}")

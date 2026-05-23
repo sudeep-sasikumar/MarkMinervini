@@ -85,14 +85,27 @@ def check_trend_template(
         c3 = price > s200
 
         # --- Criterion 4: SMA200 rising >= 20 trading days ---
-        # Index the SMA200 series by positional offset from the end
-        sma200_now = float(sma200.iloc[-1])
-        sma200_20d_ago = float(sma200.iloc[-settings.SMA200_RISING_DAYS - 1])
-        c4 = sma200_now > sma200_20d_ago
+        # SMA200 only becomes valid after 200 rows, so iloc[-221] can be NaN.
+        # Use pandas .dropna() to safely access the historical SMA200 value.
+        sma200_valid = sma200.dropna()
+        sma200_now = float(sma200_valid.iloc[-1])
+
+        # Rising over last 20 trading days (required criterion)
+        sma200_20d_ago = (
+            float(sma200_valid.iloc[-settings.SMA200_RISING_DAYS - 1])
+            if len(sma200_valid) >= settings.SMA200_RISING_DAYS + 1
+            else float("nan")
+        )
+        c4 = (not pd.isna(sma200_20d_ago)) and (sma200_now > sma200_20d_ago)
 
         # Strong flag: rising over last 100 trading days (4–5 months)
-        sma200_strong_ago = float(sma200.iloc[-settings.SMA200_RISING_STRONG_DAYS - 1])
-        c4_strong = sma200_now > sma200_strong_ago
+        # Requires 200 + 100 = 300 rows of history to be valid
+        sma200_strong_ago = (
+            float(sma200_valid.iloc[-settings.SMA200_RISING_STRONG_DAYS - 1])
+            if len(sma200_valid) >= settings.SMA200_RISING_STRONG_DAYS + 1
+            else float("nan")
+        )
+        c4_strong = (not pd.isna(sma200_strong_ago)) and (sma200_now > sma200_strong_ago)
 
         # --- Criterion 5: SMA50 > SMA150 > SMA200 (proper stack) ---
         c5 = (s50 > s150) and (s150 > s200)
@@ -129,7 +142,7 @@ def check_trend_template(
             "sma50": round(s50, 2),
             "sma150": round(s150, 2),
             "sma200": round(s200, 2),
-            "sma200_20d_ago": round(sma200_20d_ago, 2),
+            "sma200_20d_ago": round(sma200_20d_ago, 2) if not pd.isna(sma200_20d_ago) else None,
             "high_52wk": round(high_252, 2),
             "low_52wk": round(low_252, 2),
             "pct_from_52wk_high": round((price / high_252 - 1) * 100, 1),

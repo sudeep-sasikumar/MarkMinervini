@@ -17,12 +17,16 @@ COPY . .
 # Create data and logs directories for SQLite persistence
 RUN mkdir -p /app/data /app/logs
 
+# Copy the process supervisor script
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 # Expose Streamlit dashboard port
 EXPOSE 8501
 
-# Health check
+# Health check against Streamlit
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8501/_stcore/health || exit 1
 
-# Start both the scanner and the dashboard in parallel
-CMD ["sh", "-c", "python main.py & streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false"]
+# Use supervisor script: container exits if EITHER process dies (triggers Docker restart)
+ENTRYPOINT ["/docker-entrypoint.sh"]

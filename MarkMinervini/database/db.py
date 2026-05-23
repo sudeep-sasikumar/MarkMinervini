@@ -95,6 +95,12 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS system_status (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for frequent queries
 CREATE INDEX IF NOT EXISTS idx_signals_ticker_date ON signals(ticker, date);
 CREATE INDEX IF NOT EXISTS idx_watchlist_vcp ON watchlist(vcp_score DESC);

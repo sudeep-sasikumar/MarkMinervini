@@ -19,7 +19,10 @@ services:
       - DB_PATH=/app/data/sepa.db
       - LOG_PATH=/app/logs/sepa.log
     depends_on:
-      - ollama
+      ollama:
+        condition: service_started
+      ollama-pull:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
       interval: 60s
@@ -33,6 +36,27 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     command: serve
+
+  # One-shot init container: pulls the AI model so it's ready when sepa-system starts.
+  # Runs once, waits for Ollama to be ready, then exits with code 0.
+  # Docker Compose will not restart it (restart: no).
+  ollama-pull:
+    image: ollama/ollama
+    container_name: ollama_pull
+    restart: "no"
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: /bin/sh
+    command: >
+      -c "
+        echo 'Waiting for Ollama to be ready...';
+        until curl -sf http://ollama:11434/api/tags > /dev/null; do sleep 2; done;
+        echo 'Pulling llama3.2:3b...';
+        ollama pull llama3.2:3b;
+        echo 'Model ready.';
+      "
 
 volumes:
   sepa_data:
