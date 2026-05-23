@@ -1,5 +1,6 @@
 """
-Vectorbt backtester with anti-look-ahead rules (Section 14).
+Custom walk-forward backtester with anti-look-ahead rules (Section 14).
+Implemented with pandas/numpy — no external backtesting library required.
 
 Anti-look-ahead rules (strictly enforced):
   - Fundamentals: 2-day lag (earnings take 48h to appear in APIs)
@@ -42,12 +43,6 @@ def run_backtest() -> dict:
     Returns a dict with metrics and equity curve, also saves to DB.
     """
     logger.info("Starting backtest: %s → %s", settings.BACKTEST_START, settings.BACKTEST_END)
-
-    try:
-        import vectorbt as vbt
-    except ImportError:
-        logger.error("vectorbt not installed — run: pip install vectorbt")
-        return {"error": "vectorbt not installed"}
 
     try:
         # --- Fetch S&P 500 and SPY data ---
