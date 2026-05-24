@@ -130,14 +130,21 @@ def run_backtest() -> dict:
             return {"error": "No signals generated in backtest period"}
 
         combined_equity = pd.concat(all_test_equity)
+        # Walk-forward window boundaries create duplicate dates: the end of window N
+        # equals the start of window N+1, so that date appears in both Series.
+        # Duplicate dates cause spy_scaled[date_idx] to return a Series instead of
+        # a scalar → float(Series) raises TypeError.  Deduplicate before any lookups.
+        combined_equity = combined_equity[~combined_equity.index.duplicated(keep="last")]
+        combined_equity.sort_index(inplace=True)
+
         # Normalise to starting capital
         scale = settings.ACCOUNT_EQUITY_GBP / float(combined_equity.iloc[0])
         combined_equity = combined_equity * scale
 
         # SPY benchmark scaled to same starting capital
-        spy_benchmark = spy_df["Close"].loc[combined_equity.index]
-        if len(spy_benchmark) > 0:
-            spy_scaled = spy_benchmark * (settings.ACCOUNT_EQUITY_GBP / float(spy_benchmark.iloc[0]))
+        spy_benchmark = spy_df["Close"].reindex(combined_equity.index, method="ffill")
+        if len(spy_benchmark.dropna()) > 0:
+            spy_scaled = spy_benchmark * (settings.ACCOUNT_EQUITY_GBP / float(spy_benchmark.dropna().iloc[0]))
         else:
             spy_scaled = pd.Series(dtype=float)
 
@@ -157,7 +164,11 @@ def run_backtest() -> dict:
         for date_idx, val in combined_equity.items():
             record = {"date": str(date_idx.date()), "portfolio": round(float(val), 2)}
             if date_idx in spy_scaled.index:
-                record["spy"] = round(float(spy_scaled[date_idx]), 2)
+                spy_val = spy_scaled[date_idx]
+                # Guard: reindex deduplication should prevent Series here, but be safe
+                if isinstance(spy_val, pd.Series):
+                    spy_val = spy_val.iloc[0]
+                record["spy"] = round(float(spy_val), 2)
             equity_records.append(record)
 
         # --- Save to database ---
@@ -330,9 +341,21 @@ def _run_single_window(
             if not tt["passes"]:
                 continue
 
-            # VCP on available data (strict anti-look-ahead)
+            # VCP on available data (strict anti-look-ahead).
+            # Use watchlist_candidate (score >= 70) instead of alert (score >= 80
+            # AND live breakout on exactly today's bar): "alert" is calibrated for
+            # real-time daily scanning and almost never fires in historical simulation
+            # because "today's bar" is the final bar of the historical slice.
+            # The manual breakout check below replicates the essential condition.
             vcp = detect_vcp(ticker, avail, trend_template_passes=True)
-            if not vcp["alert"]:
+            pivot = vcp.get("pivot_price") or 0.0
+            current_close = float(avail["Close"].iloc[-1])
+            is_breakout = (
+                vcp.get("watchlist_candidate", False)
+                and pivot > 0
+                and current_close > pivot * 1.001   # price must be above pivot by 0.1%
+            )
+            if not is_breakout:
                 continue
 
             # Entry at T+1 open with slippage
