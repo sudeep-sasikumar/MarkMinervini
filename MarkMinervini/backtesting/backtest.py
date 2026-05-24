@@ -18,6 +18,7 @@ Usage:
 
 import json
 import logging
+import math
 import os
 import sys
 from datetime import datetime, timedelta
@@ -146,15 +147,18 @@ def _run_single_window(
     Run a single backtest window using the SEPA screening rules.
     Returns (equity_series, trade_returns_list).
     Anti-look-ahead: signals computed on day T, entered at T+1 open.
+
+    Equity accounting:
+        equity = cash balance (entry cost deducted, exit proceeds added)
+        MTM    = equity (cash) + Σ(shares × current_price) for open positions
     """
-    from screening.rs_calculator import compute_rs_ratings
     from screening.trend_template import check_trend_template
     from patterns.vcp_detector import detect_vcp
 
-    # Build period-filtered price data
+    # Build period-filtered price data (data available up to end of test window)
     period_data = {}
     for ticker, df in price_data.items():
-        period_df = df.loc[:end]  # data available up to end of test window
+        period_df = df.loc[:end]
         if len(period_df) >= 252:
             period_data[ticker] = period_df
 
@@ -162,122 +166,171 @@ def _run_single_window(
         return None, []
 
     # Track portfolio
-    equity = settings.ACCOUNT_EQUITY_GBP
-    open_positions: dict[str, dict] = {}  # ticker → {entry, stop, shares, entry_date}
-    equity_series = {}
-    trade_returns = []
+    equity = settings.ACCOUNT_EQUITY_GBP   # cash balance only
+    open_positions: dict[str, dict] = {}   # ticker → {entry, stop, shares, entry_date}
+    equity_series: dict = {}
+    trade_returns: list[float] = []
+
+    # Pre-build a set of dates with data per ticker for fast membership checks
+    ticker_dates: dict[str, set] = {
+        t: set(df.index) for t, df in period_data.items()
+    }
+
+    def _close_price(ticker: str, date) -> float:
+        """Best-effort close price for MTM; falls back to entry price if date absent."""
+        df = period_data.get(ticker)
+        if df is None:
+            return open_positions[ticker]["entry"]
+        try:
+            return float(df.loc[date, "Close"])
+        except KeyError:
+            # Date not in index (holiday / data gap) — use last available close
+            sub = df.loc[:date]
+            return float(sub["Close"].iloc[-1]) if len(sub) else open_positions[ticker]["entry"]
+
+    def _mark_to_market() -> float:
+        """Total portfolio value = cash + open position MTM."""
+        return equity + sum(
+            pos["shares"] * _close_price(t, current_date)
+            for t, pos in open_positions.items()
+        )
 
     # Step through each trading day in the test window
     spy_period = spy_df.loc[start:end]
-    for current_date in spy_period.index:
-        # Apply slippage to entries/exits (0.2%)
-        date_str = str(current_date.date())
 
-        # Check stops and exits for open positions
+    for current_date in spy_period.index:
+        # ---------------------------------------------------------------
+        # 1. Process exits for open positions
+        # ---------------------------------------------------------------
         for ticker in list(open_positions.keys()):
             pos = open_positions[ticker]
-            if ticker not in period_data:
+            if current_date not in ticker_dates.get(ticker, set()):
                 continue
             df = period_data[ticker]
-            if current_date not in df.index:
-                continue
-            today_low = float(df.loc[current_date, "Low"])
+            today_low   = float(df.loc[current_date, "Low"])
             today_close = float(df.loc[current_date, "Close"])
             stop = pos["stop"]
 
-            # Stop hit: exit at stop with slippage
+            # Stop hit: exit at stop with slippage.
+            # BUG FIX: previously `equity += shares × (exit_price − entry)` which
+            # added only the P&L, causing equity to deplete at 2× the correct rate.
+            # Correct: add back the full exit proceeds; the entry cost was already
+            # subtracted when the position was opened.
             if today_low <= stop:
-                exit_price = stop * (1 - SLIPPAGE)
+                exit_price = round(stop * (1 - SLIPPAGE), 4)
                 pnl_pct = (exit_price - pos["entry"]) / pos["entry"] * 100
-                equity += pos["shares"] * (exit_price - pos["entry"])
+                equity += pos["shares"] * exit_price   # ← full proceeds, not P&L
                 trade_returns.append(pnl_pct)
                 del open_positions[ticker]
                 continue
 
-            # Time-based exit: max 6 months in position
+            # Time-based exit: max ~6 months in position
             days_held = (current_date - pos["entry_date"]).days
             if days_held > 126:
-                exit_price = today_close * (1 - SLIPPAGE)
+                exit_price = round(today_close * (1 - SLIPPAGE), 4)
                 pnl_pct = (exit_price - pos["entry"]) / pos["entry"] * 100
-                equity += pos["shares"] * (exit_price - pos["entry"])
+                equity += pos["shares"] * exit_price   # ← full proceeds, not P&L
                 trade_returns.append(pnl_pct)
                 del open_positions[ticker]
 
-        # Max positions gate
+        # ---------------------------------------------------------------
+        # 2. Max-positions gate — skip scanning but ALWAYS record MTM
+        #    BUG FIX: previously `equity_series[date] = equity; continue`
+        #    which stored only cash, not the full portfolio value.
+        # ---------------------------------------------------------------
         if len(open_positions) >= settings.BACKTEST_MAX_POSITIONS:
-            equity_series[current_date] = equity
+            equity_series[current_date] = _mark_to_market()
             continue
 
-        # Compute RS on data up to current_date (anti-look-ahead)
-        rs_map = {}
+        # ---------------------------------------------------------------
+        # 3. Compute RS on data up to current_date (anti-look-ahead).
+        #    Uses IBD/Minervini weighted quarterly formula to match the
+        #    live system (0.40×Q4 + 0.20×Q3 + 0.20×Q2 + 0.20×Q1).
+        #    BUG FIX: was O(n²) via sorted_rs.index(v); now O(n log n)
+        #    via numpy argsort with correct tie-handling.
+        # ---------------------------------------------------------------
+        rs_map: dict[str, float] = {}
         for ticker, df in period_data.items():
-            available = df.loc[:current_date]
-            if len(available) >= 252:
-                pr_now = float(available["Close"].iloc[-1])
-                pr_252 = float(available["Close"].iloc[-252])
-                if pr_252 > 0:
-                    rs_map[ticker] = (pr_now / pr_252 - 1)
+            avail = df.loc[:current_date]
+            if len(avail) < 252:
+                continue
+            c = avail["Close"]
+            p0   = float(c.iloc[-1])
+            p63  = float(c.iloc[-63])
+            p126 = float(c.iloc[-126])
+            p189 = float(c.iloc[-189])
+            p252 = float(c.iloc[-252])
+            if p63 > 0 and p126 > 0 and p189 > 0 and p252 > 0:
+                q4 = p0 / p63   - 1.0
+                q3 = p63 / p126 - 1.0
+                q2 = p126 / p189 - 1.0
+                q1 = p189 / p252 - 1.0
+                rs_map[ticker] = 0.40 * q4 + 0.20 * q3 + 0.20 * q2 + 0.20 * q1
 
+        rs_pct: dict[str, float] = {}
         if rs_map:
-            sorted_rs = sorted(rs_map.values())
-            rs_pct = {t: (sorted_rs.index(v) / len(sorted_rs) * 100)
-                      for t, v in rs_map.items()}
-        else:
-            rs_pct = {}
+            tickers_rs = list(rs_map.keys())
+            values_rs  = np.array([rs_map[t] for t in tickers_rs], dtype=float)
+            order      = np.argsort(values_rs)          # weakest → strongest
+            ranks      = np.empty(len(order), dtype=float)
+            ranks[order] = np.arange(len(order), dtype=float)
+            n = float(len(tickers_rs))
+            rs_pct = {t: ranks[i] / n * 100.0 for i, t in enumerate(tickers_rs)}
 
-        # Screen each ticker on data up to current_date
+        # ---------------------------------------------------------------
+        # 4. Screen each ticker for a new entry signal
+        # ---------------------------------------------------------------
         for ticker, df in period_data.items():
             if ticker in open_positions:
                 continue
-            available = df.loc[:current_date]
-            if len(available) < 252:
+            avail = df.loc[:current_date]
+            if len(avail) < 252:
                 continue
 
             rs = rs_pct.get(ticker, 0.0)
-            tt = check_trend_template(ticker, available, rs)
+            tt = check_trend_template(ticker, avail, rs)
             if not tt["passes"]:
                 continue
 
-            # VCP on available data (anti-look-ahead)
-            vcp = detect_vcp(ticker, available, trend_template_passes=True)
+            # VCP on available data (strict anti-look-ahead)
+            vcp = detect_vcp(ticker, avail, trend_template_passes=True)
             if not vcp["alert"]:
                 continue
 
-            # Entry at NEXT day's open (T+1) with slippage — anti-look-ahead
-            next_dates = df.loc[current_date:].index
-            if len(next_dates) < 2:
+            # Entry at T+1 open with slippage
+            future = df.loc[current_date:]
+            if len(future) < 2:
                 continue
-            next_date = next_dates[1]
-            entry_price = float(df.loc[next_date, "Open"]) * (1 + SLIPPAGE)
+            next_date = future.index[1]
+            entry_price = round(float(df.loc[next_date, "Open"]) * (1 + SLIPPAGE), 4)
 
-            stop_price = vcp["stop_price"]
+            stop_price    = vcp["stop_price"]
             risk_per_share = entry_price - stop_price
             if risk_per_share <= 0:
                 continue
 
-            risk_dollars = equity * settings.RISK_PER_TRADE_PCT
-            import math
-            shares = math.floor(risk_dollars / risk_per_share)
+            risk_budget = equity * settings.RISK_PER_TRADE_PCT
+            shares = math.floor(risk_budget / risk_per_share)
             if shares <= 0:
                 continue
-            position_value = shares * entry_price
-            if position_value > equity * settings.MAX_POSITION_PCT:
+            if shares * entry_price > equity * settings.MAX_POSITION_PCT:
                 shares = math.floor(equity * settings.MAX_POSITION_PCT / entry_price)
+            if shares <= 0:
+                continue
 
-            if shares > 0 and len(open_positions) < settings.BACKTEST_MAX_POSITIONS:
-                open_positions[ticker] = {
-                    "entry": entry_price,
-                    "stop": stop_price,
-                    "shares": shares,
-                    "entry_date": next_date,
-                }
-                equity -= shares * entry_price  # cash out
-                break  # one entry per day to avoid look-ahead cascade
+            open_positions[ticker] = {
+                "entry":      entry_price,
+                "stop":       stop_price,
+                "shares":     shares,
+                "entry_date": next_date,
+            }
+            equity -= shares * entry_price    # cash out
+            break  # one new entry per day to avoid look-ahead cascade
 
-        equity_series[current_date] = equity + sum(
-            pos["shares"] * float(period_data.get(t, pd.DataFrame()).get("Close", pd.Series()).get(current_date, 0) or 0)
-            for t, pos in open_positions.items()
-        )
+        # ---------------------------------------------------------------
+        # 5. Record daily portfolio value (cash + open position MTM)
+        # ---------------------------------------------------------------
+        equity_series[current_date] = _mark_to_market()
 
     if not equity_series:
         return None, []

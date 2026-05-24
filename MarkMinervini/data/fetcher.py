@@ -148,6 +148,15 @@ def fetch_ohlcv_batch(tickers: list[str], period: str = "2y") -> dict[str, pd.Da
                 # Single ticker returned as flat frame
                 df = raw.dropna(how="all")
             if len(df) >= 200:
+                # Normalise to tz-naive so callers can slice with tz-naive timestamps.
+                # yf.download() returns tz-aware UTC index in yfinance 0.2.x+; the
+                # single-ticker path (_fetch_yfinance / fetch_ohlcv) already strips tz
+                # via tz_localize(None).  Without this, df.loc[:tz_naive_date] raises
+                # "TypeError: Cannot compare tz-naive and tz-aware datetime-like objects"
+                # — this is the root cause of the backtest crash.
+                if getattr(df.index, "tz", None) is not None:
+                    df = df.copy()
+                    df.index = df.index.tz_localize(None)
                 result[ticker] = df.sort_index()
         except Exception as exc:
             logger.debug("Failed to extract %s from bulk download: %s", ticker, exc)
