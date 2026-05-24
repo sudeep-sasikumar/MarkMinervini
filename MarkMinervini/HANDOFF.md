@@ -1024,4 +1024,31 @@ Track each work session here. Add a new entry at the start of every new Claude C
 
 ---
 
+### Session 11 — Eleventh Review: Backtest diagnostics + defensive tz handling
+**Date:** 24 May 2026 (continuation after Session 10)
+**Trigger:** User reported backtest still failing with identical truncated log. Diagnosis: old Docker image still running (CI hadn't completed before user retried), AND dashboard showing only first 500 chars of stderr so the real error was never visible.
+
+**Root cause of "same error again":** `result.stderr[:500]` in dashboard.py truncated all the INFO log lines; the actual `ERROR:` line appeared later in stderr but was cut off. User could never see what was actually crashing.
+
+**Fixes applied:**
+
+| # | File | Fix |
+|---|---|---|
+| 1 | `dashboard.py` | Changed from `result.stderr[:500]` to showing the LAST 6000 chars of stderr (error is at the bottom, not the top) + stdout in an expandable panel labeled "Full error + traceback" |
+| 2 | `dashboard.py` | Added `⬇️ Download full log file` button on System Status page — lets user retrieve the complete `/app/logs/sepa.log` without SSH access |
+| 3 | `dashboard.py` | Log viewer now has a slider (50–500 lines) instead of hardcoded 50 |
+| 4 | `backtesting/backtest.py` | Exception handler prints full traceback to stdout (`print(traceback.format_exc())`) — captured separately from the logging stream, always visible to the dashboard subprocess |
+| 5 | `backtesting/backtest.py` | Added defensive tz-normalisation loop in `run_backtest()` before the walk-forward loop — second layer of protection in case the per-ticker fix in `fetch_ohlcv_batch` didn't fire (logs WARNING with count if any DataFrames needed stripping) |
+| 6 | `backtesting/backtest.py` | Added SPY date-range validation: raises a clear ValueError if SPY data doesn't cover the configured backtest period (was a silent empty loop before) |
+
+**Test result: 50/50 passing**
+**Key commits:** `bc76c9e` (pushed)
+
+**Next step for user:**
+1. Wait for CI to complete (check GitHub Actions)
+2. Pull new Docker image in Hostinger → restart container
+3. Run backtest again — if it still fails, the "Full error + traceback" panel will now show the EXACT Python exception
+
+---
+
 *End of HANDOFF.md — update the Session Log and Remaining Issues sections at the end of each session.*
