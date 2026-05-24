@@ -26,12 +26,13 @@ def format_breakout_alert(
     rs_rating: float,
     rs_line_new_high: bool,
     earnings_warning: str = "",
-    vps_ip: str = "YOUR_VPS_IP",
+    vps_ip: str = "",
 ) -> str:
     """
     Format the full breakout alert message for Telegram.
     Matches the template in Section 11 of the master prompt.
     """
+    vps_ip = vps_ip or settings.VPS_IP
     grade = vcp.get("grade", "HIGH QUALITY VCP")
     score = vcp.get("vcp_score", 0)
     entry = vcp.get("entry_price", 0.0)
@@ -163,11 +164,28 @@ def format_morning_briefing(
     sector_leaders: list[dict],
     weak_sectors: list[str],
     economic_events: list[str],
-    vps_ip: str = "YOUR_VPS_IP",
+    vps_ip: str = "",
 ) -> str:
     """Format the daily morning briefing message (1:00 PM BST)."""
-    from datetime import date
+    from datetime import date, datetime
+    import pytz
+
     today = date.today().strftime("%A %-d %B %Y")
+    _vps_ip = vps_ip or settings.VPS_IP
+
+    # Compute accurate time-to-open so the message is factually correct.
+    # The briefing fires at 13:00 BST; US market opens at 13:30 BST.
+    try:
+        _bst = pytz.timezone("Europe/London")
+        _now = datetime.now(_bst)
+        _open = _now.replace(hour=13, minute=30, second=0, microsecond=0)
+        _mins = int((_open - _now).total_seconds() / 60)
+        if _mins > 0:
+            market_status = f"US market opens in ~{_mins} min 🔔"
+        else:
+            market_status = "US market is OPEN 🟢"
+    except Exception:
+        market_status = "US market opens at 13:30 BST 🔔"
 
     regime_label = regime.get("regime", "NEUTRAL")
     regime_emoji = "🟢" if regime_label == "BULL" else ("🔴" if regime_label == "BEAR" else "🟡")
@@ -191,7 +209,7 @@ def format_morning_briefing(
 
     return (
         f"📋 MORNING BRIEFING — {today}\n"
-        f"US market opens in ~1h\n"
+        f"{market_status}\n"
         f"\n"
         f"🌍 Regime: {regime_emoji} {regime_label} ({sizing_str})\n"
         f"Breadth: {breadth_str} | VIX: {vix:.1f} | Dist Days: {dist}/{settings.DISTRIBUTION_DAYS_DANGER}\n"
@@ -204,17 +222,56 @@ def format_morning_briefing(
         f"Leaders: {leaders_str}\n"
         f"Weak: {weak_str}\n"
         f"\n"
-        f"Dashboard: http://{vps_ip}:{settings.DASHBOARD_PORT}"
+        f"Dashboard: http://{_vps_ip}:{settings.DASHBOARD_PORT}"
     )
 
 
-def format_bear_market_alert() -> str:
+def format_bear_market_alert(regime: dict = None) -> str:
+    """
+    Format the bear-market suppression alert.
+
+    Accepts the full regime dict so the actual trigger reason is shown
+    rather than a hardcoded 'SPY below 200-day SMA' message which was
+    factually wrong when the trigger was distribution days or high VIX.
+    """
+    if regime is not None:
+        dist = regime.get("distribution_days", 0)
+        vix  = regime.get("vix_level", 0.0)
+        breadth = regime.get("breadth_pct")
+        spy_above = regime.get("spy_above_sma200", None)
+
+        reason_lines = []
+        if spy_above is False:
+            spy_close  = regime.get("spy_close", "?")
+            spy_sma200 = regime.get("spy_sma200", "?")
+            reason_lines.append(f"📉 SPY below 200-day SMA (${spy_close} < ${spy_sma200})")
+        if dist >= settings.DISTRIBUTION_DAYS_DANGER:
+            reason_lines.append(
+                f"📊 Distribution days: {dist}/{settings.DISTRIBUTION_DAYS_DANGER} "
+                f"(danger threshold reached)"
+            )
+        if vix >= settings.VIX_DANGER:
+            reason_lines.append(f"😱 VIX: {vix:.1f} — extreme fear")
+        if breadth is not None and breadth < settings.BREADTH_BEAR:
+            reason_lines.append(f"📉 Breadth: {breadth:.1f}% — bear territory")
+
+        # If no specific cause matched, show the full summary
+        if not reason_lines:
+            summary = regime.get("regime_summary", "Signals suppressed")
+            reason_lines.append(summary)
+
+        reasons = "\n".join(reason_lines)
+    else:
+        reasons = "Market conditions do not favour new long positions."
+
     return (
-        "⚠️ BEAR MARKET MODE\n"
-        "SPY below 200-day SMA.\n"
-        "No new long positions.\n"
-        "Monitor existing stops carefully.\n"
-        "Cash is a position."
+        f"⚠️ BEAR MARKET MODE — Signals Suppressed\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{reasons}\n"
+        f"\n"
+        f"No new long positions.\n"
+        f"Monitor existing stops carefully.\n"
+        f"Cash is a position. 💵"
     )
 
 

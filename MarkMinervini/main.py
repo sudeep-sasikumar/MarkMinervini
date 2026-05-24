@@ -83,10 +83,16 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         logger.info("Regime: %s | Aggression: %.2f | Signals allowed: %s",
                     regime["regime"], regime["aggression_factor"], regime["signals_allowed"])
 
-        if not regime["signals_allowed"]:
-            logger.warning("Signals suppressed by regime gate: %s", regime["regime"])
-            if not test_mode:
-                return []
+        # Bear mode: continue scanning and building the watchlist so we are ready
+        # to act when conditions improve.  Only suppress alert SENDING.
+        # Previously `return []` in bear mode silently stopped all scanning,
+        # leaving the watchlist stale and blocking all watchlist-building.
+        signals_suppressed = not regime["signals_allowed"]
+        if signals_suppressed:
+            logger.warning(
+                "BEAR/NEUTRAL SUPPRESSION: Scanning continues but alerts are suppressed. "
+                "Reason: %s", regime.get("regime_summary", regime["regime"])
+            )
 
         # --- Step 4: Trend Template filter ---
         from screening.trend_template import check_trend_template
@@ -215,6 +221,15 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                 if not vcp["alert"]:
                     continue
 
+                # Bear / suppression gate: allow watchlist building above,
+                # but do not send alerts when regime has disabled signals.
+                if signals_suppressed:
+                    logger.info(
+                        "Alert suppressed (regime=%s): %s | VCP=%d",
+                        regime["regime"], ticker, vcp["vcp_score"]
+                    )
+                    continue
+
                 # Sector stage2 gate
                 sector_info = _get_ticker_sector(ticker)
                 sector = sector_info.get("sector", "Unknown")
@@ -263,6 +278,7 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                     rs_rating=rs,
                     rs_line_new_high=rs_line_nh,
                     earnings_warning=earn_status["message"] if earn_status["action"] == "warn" else "",
+                    vps_ip=settings.VPS_IP,
                 )
 
                 # Save to database

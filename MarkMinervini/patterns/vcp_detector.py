@@ -164,9 +164,13 @@ def detect_vcp(
     steps["base_days"] = base_days
     base_result["base_days"] = base_days
 
-    if base_days < settings.MIN_BASE_WEEKS * 5:
+    # Minimum base length: 60 trading days (settings.MIN_BASE_TRADING_DAYS).
+    # Previously used MIN_BASE_WEEKS * 5 = 15 days, which contradicted both the
+    # docstring ("60–120 trading days") and the settings constant.
+    if base_days < settings.MIN_BASE_TRADING_DAYS:
         base_result["rejection_reason"] = (
-            f"Step 3: Base only {base_days} days (minimum {settings.MIN_BASE_WEEKS * 5})"
+            f"Step 3: Base only {base_days} days "
+            f"(minimum {settings.MIN_BASE_TRADING_DAYS} trading days)"
         )
         base_result["steps"] = steps
         return base_result

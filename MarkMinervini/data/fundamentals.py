@@ -8,7 +8,9 @@ All results cached 7 days in SQLite.
 import json
 import logging
 import os
+import threading
 import time
+from collections import deque
 from typing import Optional
 
 import requests
@@ -20,10 +22,36 @@ logger = logging.getLogger(__name__)
 
 _AV_CALLS_TODAY = 0  # rough in-process counter (resets on restart)
 
+# ---------------------------------------------------------------------------
+# Finnhub rate limiter — 55 calls / 60 s (free tier ceiling)
+# Uses a sliding-window deque; thread-safe via lock.
+# Previously fundamentals.py bypassed the shared rate limiter entirely,
+# causing 429 errors on batch runs.
+# ---------------------------------------------------------------------------
+_fh_lock = threading.Lock()
+_fh_call_times: deque = deque()
+
 
 def _finnhub_get(endpoint: str, params: dict) -> Optional[dict]:
     if not settings.FINNHUB_API_KEY:
         return None
+
+    with _fh_lock:
+        now = time.time()
+        # Drop calls older than the 60-second window
+        while _fh_call_times and now - _fh_call_times[0] > 60.0:
+            _fh_call_times.popleft()
+        # If at the per-minute ceiling, sleep until the oldest call ages out
+        if len(_fh_call_times) >= settings.FINNHUB_MAX_CALLS_PER_MIN:
+            wait = 60.0 - (now - _fh_call_times[0]) + 0.1
+            if wait > 0:
+                logger.debug("Finnhub rate limit: sleeping %.1fs", wait)
+                time.sleep(wait)
+            now = time.time()
+            while _fh_call_times and now - _fh_call_times[0] > 60.0:
+                _fh_call_times.popleft()
+        _fh_call_times.append(time.time())
+
     url = f"https://finnhub.io/api/v1{endpoint}"
     params["token"] = settings.FINNHUB_API_KEY
     try:
@@ -201,44 +229,71 @@ def _parse_quarterly(reports: list, base: dict) -> None:
 
 
 def _alpha_vantage_fallback(ticker: str, base: dict) -> None:
-    """Use Alpha Vantage INCOME_STATEMENT as last resort."""
-    data = _alpha_vantage_get("INCOME_STATEMENT", {"symbol": ticker})
-    if not data or "quarterlyReports" not in data:
-        return
-    try:
-        reports = data["quarterlyReports"]
-        if len(reports) < 5:
-            return
-        q0 = reports[0]
-        q4 = reports[4]
+    """
+    Use Alpha Vantage as last-resort fallback (max 25 calls/day).
 
-        def _float(d, k):
-            v = d.get(k)
-            if v and v != "None":
-                try:
-                    return float(v)
-                except ValueError:
-                    pass
-            return None
+    Two separate endpoints are used because AV's INCOME_STATEMENT quarterly
+    reports do NOT reliably contain reportedEPS — that field lives in the
+    dedicated EARNINGS endpoint.  Mixing them caused EPS to always be None
+    when Finnhub failed, silently poisoning the hard-gate check.
 
-        eps_now = _float(q0, "reportedEPS")
-        eps_ly = _float(q4, "reportedEPS")
-        rev_now = _float(q0, "totalRevenue")
-        rev_ly = _float(q4, "totalRevenue")
-        gp_now = _float(q0, "grossProfit")
-        gp_ly = _float(q4, "grossProfit")
+    Call order:
+      1. EARNINGS  → EPS (reportedEPS), surprise pct
+      2. INCOME_STATEMENT → revenue, gross profit (for margins)
+    """
 
-        if eps_now is not None and eps_ly and eps_ly != 0:
-            base["eps_growth_yoy"] = (eps_now - eps_ly) / abs(eps_ly) * 100
-        if rev_now is not None and rev_ly and rev_ly != 0:
-            base["rev_growth_yoy"] = (rev_now - rev_ly) / abs(rev_ly) * 100
-        if gp_now is not None and rev_now and rev_now != 0:
-            base["gross_margin_current"] = gp_now / rev_now * 100
-        if gp_ly is not None and rev_ly and rev_ly != 0:
-            base["gross_margin_prior"] = gp_ly / rev_ly * 100
+    def _float(d: dict, k: str) -> Optional[float]:
+        v = d.get(k)
+        if v and v not in ("None", ""):
+            try:
+                return float(v)
+            except ValueError:
+                pass
+        return None
+
+    # --- 1. EARNINGS endpoint: per-share EPS (quarterly) ---
+    eps_data = _alpha_vantage_get("EARNINGS", {"symbol": ticker})
+    if eps_data and "quarterlyEarnings" in eps_data:
+        try:
+            reports = eps_data["quarterlyEarnings"]
+            if len(reports) >= 5:
+                q0 = reports[0]   # most recent quarter
+                q4 = reports[4]   # same quarter last year
+                eps_now = _float(q0, "reportedEPS")
+                eps_ly  = _float(q4, "reportedEPS")
+                if eps_now is not None and eps_ly and eps_ly != 0:
+                    base["eps_growth_yoy"] = (eps_now - eps_ly) / abs(eps_ly) * 100
+                # Bonus: capture earnings surprise if available
+                surprise = _float(q0, "surprisePercentage")
+                if surprise is not None:
+                    base["eps_surprise_pct"] = surprise
+        except Exception as exc:
+            logger.debug("Alpha Vantage EARNINGS parse error for %s: %s", ticker, exc)
+
+    # --- 2. INCOME_STATEMENT endpoint: revenue + gross profit ---
+    income_data = _alpha_vantage_get("INCOME_STATEMENT", {"symbol": ticker})
+    if income_data and "quarterlyReports" in income_data:
+        try:
+            reports = income_data["quarterlyReports"]
+            if len(reports) >= 5:
+                q0 = reports[0]
+                q4 = reports[4]
+                rev_now = _float(q0, "totalRevenue")
+                rev_ly  = _float(q4, "totalRevenue")
+                gp_now  = _float(q0, "grossProfit")
+                gp_ly   = _float(q4, "grossProfit")
+
+                if rev_now is not None and rev_ly and rev_ly != 0:
+                    base["rev_growth_yoy"] = (rev_now - rev_ly) / abs(rev_ly) * 100
+                if gp_now is not None and rev_now and rev_now != 0:
+                    base["gross_margin_current"] = gp_now / rev_now * 100
+                if gp_ly is not None and rev_ly and rev_ly != 0:
+                    base["gross_margin_prior"] = gp_ly / rev_ly * 100
+        except Exception as exc:
+            logger.debug("Alpha Vantage INCOME_STATEMENT parse error for %s: %s", ticker, exc)
+
+    if base["eps_growth_yoy"] is not None or base["rev_growth_yoy"] is not None:
         base["status"] = "ok"
-    except Exception as exc:
-        logger.debug("Alpha Vantage parse error for %s: %s", ticker, exc)
 
 
 if __name__ == "__main__":

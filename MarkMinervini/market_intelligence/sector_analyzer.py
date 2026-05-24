@@ -31,7 +31,9 @@ def fetch_sector_performance() -> dict[str, dict]:
     result = {}
     for sector, etf in settings.SECTOR_ETF_MAP.items():
         try:
-            df = fetch_ohlcv(etf, period="1y")
+            # Use 2y so the 200-SMA and 52-week range checks in check_trend_template
+            # have enough history.  1y is borderline and fails intermittently.
+            df = fetch_ohlcv(etf, period="2y")
             if df is None or len(df) < 66:
                 continue
             close = df["Close"]
@@ -42,8 +44,12 @@ def fetch_sector_performance() -> dict[str, dict]:
             one_month_pct = (price_now / price_1m - 1) * 100
             three_month_pct = (price_now / price_3m - 1) * 100
 
-            # Check Stage 2 status for this ETF
-            tt = check_trend_template(etf, df, rs_rating=50.0)
+            # Stage 2 check for this sector ETF.
+            # Pass rs_rating=100.0 so the RS criterion (c8) does not block sector ETFs —
+            # we don't compute a cross-ETF RS percentile; the test should be structural only.
+            # Previously rs_rating=50.0 caused c8 (50 < RS_MINIMUM=70) to always fail,
+            # making every sector appear as "Not Stage 2" and blocking all signals.
+            tt = check_trend_template(etf, df, rs_rating=100.0)
             stage2 = tt["passes"]
 
             result[sector] = {

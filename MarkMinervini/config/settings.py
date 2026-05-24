@@ -73,6 +73,7 @@ PORTFOLIO_DRAWDOWN_STOP = 0.30      # aggression → 0.0, no new positions
 DISTRIBUTION_DAYS_CAUTION = 3   # reduce position sizes to 50%
 DISTRIBUTION_DAYS_DANGER = 5    # suppress all signals
 DISTRIBUTION_LOOKBACK = 25      # sessions to scan for distribution days
+DISTRIBUTION_DAY_MIN_DROP = 0.002   # 0.2% minimum close-to-close drop (IBD definition)
 SPY_DROP_CORRECTION = 0.05      # SPY drop threshold for FTD tracking
 FTD_MIN_GAIN = 0.017            # minimum FTD gain (1.7%)
 FTD_MIN_DAY = 4                 # FTD must be day 4+ of attempted rally
@@ -123,6 +124,7 @@ ALPHA_VANTAGE_MAX_DAILY = 25
 # Account
 # ---------------------------------------------------------------------------
 ACCOUNT_EQUITY_GBP = float(os.getenv("ACCOUNT_EQUITY_GBP", 50000))
+VPS_IP = os.getenv("VPS_IP", "YOUR_VPS_IP")   # used in Telegram dashboard links
 
 # ---------------------------------------------------------------------------
 # Dashboard

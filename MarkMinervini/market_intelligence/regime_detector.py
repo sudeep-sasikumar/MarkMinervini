@@ -29,9 +29,10 @@ def detect_regime(
     Args:
         spy_df:       SPY OHLCV DataFrame (fetched if None)
         qqq_df:       QQQ OHLCV DataFrame (fetched if None)
-        breadth_pct:  % of S&P 500 stocks above 200-SMA (from breadth_monitor)
+        breadth_pct:  % of S&P 500 stocks above 200-SMA (from breadth_monitor).
+                      If None, read from cache so breadth always contributes.
 
-    Returns regime dict (see SECTION 7 shape in master prompt).
+    Returns regime dict including diagnostic fields for full audit trail.
     """
     cache_key = "regime:latest"
     cached = cache_get(cache_key)
@@ -42,6 +43,15 @@ def detect_regime(
         spy_df = fetch_ohlcv("SPY", "2y")
     if qqq_df is None:
         qqq_df = fetch_ohlcv("QQQ", "2y")
+
+    # If breadth was not supplied by the caller, read the most-recent cached value
+    # computed by compute_breadth() in job_data_refresh.  This ensures the breadth
+    # gate never silently fires on a None reading.
+    if breadth_pct is None:
+        cached_breadth = cache_get("breadth:sp500_above_200sma")
+        if cached_breadth is not None:
+            breadth_pct = float(cached_breadth)
+            logger.debug("Regime: using cached breadth %.1f%%", breadth_pct)
 
     vix = fetch_vix() or 20.0
     result = _assess_regime(spy_df, qqq_df, vix, breadth_pct)
@@ -64,30 +74,41 @@ def _assess_regime(
     high_impact_event = False
     issues = []
 
-    # ---- Bear market gate: SPY < SMA200 ----
+    # ---- Capture all SPY diagnostics in one pass ----
+    spy_close: Optional[float] = None
+    spy_sma50: Optional[float] = None
+    spy_sma150: Optional[float] = None
+    spy_sma200: Optional[float] = None
+    spy_above_sma200: Optional[bool] = None
+    spy_ma_stack_ok: Optional[bool] = None
+    spy_last_date: Optional[str] = None
     bear_gate = False
+
     if spy_df is not None and len(spy_df) >= 200:
         close = spy_df["Close"]
-        sma200 = float(close.rolling(200).mean().iloc[-1])
-        price = float(close.iloc[-1])
-        bear_gate = price < sma200
+        spy_sma50  = float(close.rolling(50).mean().iloc[-1])
+        spy_sma150 = float(close.rolling(150).mean().iloc[-1])
+        spy_sma200 = float(close.rolling(200).mean().iloc[-1])
+        spy_close  = float(close.iloc[-1])
+        spy_last_date = str(spy_df.index[-1].date())
+        spy_above_sma200 = spy_close > spy_sma200
+        spy_ma_stack_ok  = (spy_sma50 > spy_sma150 > spy_sma200)
+
+        # Bear gate: price below SMA200
+        bear_gate = not spy_above_sma200
         if bear_gate:
             regime = "BEAR"
             signals_allowed = False
             aggression = 0.0
             issues.append("SPY below SMA200")
-
-    # ---- MA stack health ----
-    if spy_df is not None and len(spy_df) >= 200 and not bear_gate:
-        close = spy_df["Close"]
-        sma50 = float(close.rolling(50).mean().iloc[-1])
-        sma150 = float(close.rolling(150).mean().iloc[-1])
-        sma200 = float(close.rolling(200).mean().iloc[-1])
-        if not (sma50 > sma150 > sma200):
+        elif not spy_ma_stack_ok:
             issues.append("SPY MA stack broken")
             aggression = min(aggression, 0.75)
 
     # ---- Distribution day counter ----
+    # Uses IBD/Minervini definition: close down >= 0.2% on HIGHER volume.
+    # Without the 0.2% minimum, any tiny down-tick on higher volume is counted,
+    # causing severe over-counting in bull markets (root cause of false BEAR alert).
     if spy_df is not None and len(spy_df) > settings.DISTRIBUTION_LOOKBACK:
         dist_days = _count_distribution_days(
             spy_df.tail(settings.DISTRIBUTION_LOOKBACK + 1)
@@ -95,7 +116,7 @@ def _assess_regime(
         if dist_days >= settings.DISTRIBUTION_DAYS_DANGER:
             signals_allowed = False
             aggression = 0.0
-            issues.append(f"Distribution days {dist_days} >= danger threshold")
+            issues.append(f"Distribution days {dist_days} >= danger threshold {settings.DISTRIBUTION_DAYS_DANGER}")
         elif dist_days >= settings.DISTRIBUTION_DAYS_CAUTION:
             aggression = min(aggression, 0.5)
             issues.append(f"Distribution days {dist_days} — caution")
@@ -154,6 +175,7 @@ def _assess_regime(
     summary = "; ".join(issues) if issues else "All systems healthy"
 
     return {
+        # --- Core regime fields ---
         "regime": regime,
         "aggression_factor": round(aggression, 2),
         "signals_allowed": signals_allowed,
@@ -163,21 +185,38 @@ def _assess_regime(
         "ftd_confirmed": ftd_confirmed,
         "high_impact_event_imminent": high_impact_event,
         "regime_summary": summary,
+        # --- Diagnostic / audit-trail fields ---
+        "spy_close": round(spy_close, 2) if spy_close is not None else None,
+        "spy_sma50": round(spy_sma50, 2) if spy_sma50 is not None else None,
+        "spy_sma150": round(spy_sma150, 2) if spy_sma150 is not None else None,
+        "spy_sma200": round(spy_sma200, 2) if spy_sma200 is not None else None,
+        "spy_above_sma200": spy_above_sma200,
+        "spy_ma_stack_ok": spy_ma_stack_ok,
+        "spy_last_date": spy_last_date,
+        "bear_gate": bear_gate,
     }
 
 
 def _count_distribution_days(df: pd.DataFrame) -> int:
     """
     Count distribution days in a window.
-    Distribution day = SPY closes DOWN with volume HIGHER than prior session.
+
+    IBD / Minervini definition:
+        - Index closes DOWN by at least 0.2% from the prior close
+        - On HIGHER volume than the prior session
+
+    The 0.2% minimum is critical: without it any micro-tick lower on slightly
+    higher volume is counted, producing extreme over-counts in bull markets.
     """
     count = 0
     for i in range(1, len(df)):
         close_today = df["Close"].iloc[i]
-        close_prev = df["Close"].iloc[i - 1]
-        vol_today = df["Volume"].iloc[i]
-        vol_prev = df["Volume"].iloc[i - 1]
-        if close_today < close_prev and vol_today > vol_prev:
+        close_prev  = df["Close"].iloc[i - 1]
+        vol_today   = df["Volume"].iloc[i]
+        vol_prev    = df["Volume"].iloc[i - 1]
+        daily_change = close_today / close_prev - 1
+        # Must drop >= 0.2% AND on higher volume (IBD/Minervini definition)
+        if daily_change <= -settings.DISTRIBUTION_DAY_MIN_DROP and vol_today > vol_prev:
             count += 1
     return count
 
@@ -186,6 +225,9 @@ def _check_ftd(spy_df: pd.DataFrame) -> bool:
     """
     Check if a valid Follow-Through Day has occurred after the most recent correction.
     Returns True if FTD confirmed (or no correction detected — market is healthy).
+
+    Fix: correction trough is now the LOWEST CLOSE during the in-correction window,
+    not the LAST day that was flagged as in-correction (which is always a recovery day).
     """
     close = spy_df["Close"]
     volume = spy_df["Volume"]
@@ -199,15 +241,17 @@ def _check_ftd(spy_df: pd.DataFrame) -> bool:
         # No recent correction — assume healthy market, FTD not needed
         return True
 
-    # Find the correction low (most recent)
-    recent = in_correction.iloc[-60:]
-    if not recent.any():
+    recent_in_corr = in_correction.iloc[-60:]
+    if not recent_in_corr.any():
         return True
 
-    correction_start = recent[recent].index[-1]
-    corr_idx = spy_df.index.get_loc(correction_start)
+    # Find the correction TROUGH: the date with the lowest close while in correction.
+    # Previously used index[-1] which picks the last in-correction day (not the low).
+    correction_dates = recent_in_corr[recent_in_corr].index
+    correction_trough_date = close[correction_dates].idxmin()
+    corr_idx = spy_df.index.get_loc(correction_trough_date)
 
-    # Look for FTD: day 4+ with gain >= 1.7% on higher volume
+    # Look for FTD: day 4+ from trough with gain >= 1.7% on higher volume
     sub = spy_df.iloc[corr_idx:]
     for i in range(3, len(sub)):
         daily_gain = (sub["Close"].iloc[i] / sub["Close"].iloc[i - 1]) - 1
@@ -229,3 +273,7 @@ if __name__ == "__main__":
     print(f"regime_detector.py: regime={regime['regime']}, "
           f"aggression={regime['aggression_factor']}, vix={regime['vix_level']}")
     print(f"  summary: {regime['regime_summary']}")
+    print(f"  SPY: close={regime['spy_close']}, SMA200={regime['spy_sma200']}, "
+          f"above_200={regime['spy_above_sma200']}, date={regime['spy_last_date']}")
+    print(f"  distribution_days={regime['distribution_days']}, "
+          f"bear_gate={regime['bear_gate']}")

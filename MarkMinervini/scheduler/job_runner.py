@@ -32,10 +32,10 @@ def create_scheduler() -> BackgroundScheduler:
     """Build and return a configured APScheduler instance (not yet started)."""
     scheduler = BackgroundScheduler(timezone=BST)
 
-    # --- 08:00 BST: Data refresh ---
+    # --- 08:00 BST Mon–Fri: Data refresh ---
     scheduler.add_job(
         job_data_refresh,
-        CronTrigger(hour=8, minute=0, timezone=BST),
+        CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=BST),
         id="data_refresh",
         name="Data refresh + RS + Breadth",
         replace_existing=True,
@@ -43,10 +43,10 @@ def create_scheduler() -> BackgroundScheduler:
         misfire_grace_time=600,
     )
 
-    # --- 09:00 BST: Market intelligence ---
+    # --- 09:00 BST Mon–Fri: Market intelligence ---
     scheduler.add_job(
         job_market_intelligence,
-        CronTrigger(hour=9, minute=0, timezone=BST),
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=BST),
         id="market_intelligence",
         name="Regime + Sectors + Macro",
         replace_existing=True,
@@ -54,10 +54,10 @@ def create_scheduler() -> BackgroundScheduler:
         misfire_grace_time=300,
     )
 
-    # --- 11:00 BST: Full screening run #1 ---
+    # --- 11:00 BST Mon–Fri: Full screening run #1 ---
     scheduler.add_job(
         job_full_scan,
-        CronTrigger(hour=11, minute=0, timezone=BST),
+        CronTrigger(day_of_week="mon-fri", hour=11, minute=0, timezone=BST),
         id="full_scan_1",
         name="Full screen #1",
         replace_existing=True,
@@ -65,20 +65,20 @@ def create_scheduler() -> BackgroundScheduler:
         misfire_grace_time=600,
     )
 
-    # --- 13:00 BST: Morning briefing ---
+    # --- 13:00 BST Mon–Fri: Morning briefing ---
     scheduler.add_job(
         job_morning_briefing,
-        CronTrigger(hour=13, minute=0, timezone=BST),
+        CronTrigger(day_of_week="mon-fri", hour=13, minute=0, timezone=BST),
         id="morning_briefing",
         name="Morning Telegram briefing",
         replace_existing=True,
         max_instances=1,
     )
 
-    # --- 15:30 BST: Full screening run #2 ---
+    # --- 15:30 BST Mon–Fri: Full screening run #2 ---
     scheduler.add_job(
         job_full_scan,
-        CronTrigger(hour=15, minute=30, timezone=BST),
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=BST),
         id="full_scan_2",
         name="Full screen #2",
         replace_existing=True,
@@ -86,10 +86,10 @@ def create_scheduler() -> BackgroundScheduler:
         misfire_grace_time=600,
     )
 
-    # --- 19:00 BST: Full screening run #3 ---
+    # --- 19:00 BST Mon–Fri: Full screening run #3 ---
     scheduler.add_job(
         job_full_scan,
-        CronTrigger(hour=19, minute=0, timezone=BST),
+        CronTrigger(day_of_week="mon-fri", hour=19, minute=0, timezone=BST),
         id="full_scan_3",
         name="Full screen #3",
         replace_existing=True,
@@ -97,10 +97,10 @@ def create_scheduler() -> BackgroundScheduler:
         misfire_grace_time=600,
     )
 
-    # --- 21:15 BST: Post-market wrap ---
+    # --- 21:15 BST Mon–Fri: Post-market wrap ---
     scheduler.add_job(
         job_post_market,
-        CronTrigger(hour=21, minute=15, timezone=BST),
+        CronTrigger(day_of_week="mon-fri", hour=21, minute=15, timezone=BST),
         id="post_market",
         name="Post-market wrap",
         replace_existing=True,
@@ -174,15 +174,23 @@ def job_market_intelligence():
         from market_intelligence.sector_analyzer import fetch_sector_performance
         from data.cache import delete
 
-        # Force fresh regime data
-        delete("regime:latest")
+        # Force fresh regime data by deleting ALL stale underlying cache keys.
+        # Previously only "regime:latest" was deleted, so regime recomputed on
+        # stale SPY/QQQ/VIX/breadth data — defeating the forced refresh.
+        for key in ("regime:latest", "ohlcv:SPY:2y", "ohlcv:QQQ:2y",
+                    "vix:latest", "breadth:sp500_above_200sma",
+                    "sector:performance"):
+            delete(key)
+
         regime = detect_regime()
         sector_perf = fetch_sector_performance()
 
         if not regime["signals_allowed"]:
             from alerts.telegram_bot import send_message
             from alerts.alert_formatter import format_bear_market_alert
-            send_message(format_bear_market_alert())
+            # Pass the full regime dict so the alert shows the actual trigger reason
+            # instead of always hardcoding "SPY below 200-day SMA"
+            send_message(format_bear_market_alert(regime=regime))
 
         logger.info("Market intelligence: regime=%s, aggression=%.2f",
                     regime["regime"], regime["aggression_factor"])
@@ -232,6 +240,7 @@ def job_morning_briefing():
         from data.economic_calendar import get_high_impact_events
         economic_events = get_high_impact_events(days_ahead=2)
 
+        from config import settings as _settings
         msg = format_morning_briefing(
             regime=regime,
             watchlist=watch_list,
@@ -240,6 +249,7 @@ def job_morning_briefing():
             sector_leaders=leaders,
             weak_sectors=weak_sectors,
             economic_events=economic_events,
+            vps_ip=_settings.VPS_IP,
         )
         send_message(msg)
     except Exception as exc:

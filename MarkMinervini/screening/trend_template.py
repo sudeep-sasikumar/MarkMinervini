@@ -71,9 +71,17 @@ def check_trend_template(
         sma200 = close.rolling(200).mean()
 
         price = float(close.iloc[-1])
-        s50 = float(sma50.iloc[-1])
-        s150 = float(sma150.iloc[-1])
-        s200 = float(sma200.iloc[-1])
+        s50   = float(sma50.iloc[-1])
+        s150  = float(sma150.iloc[-1])
+        s200  = float(sma200.iloc[-1])
+
+        # Guard: any NaN means Close has gaps that broke the rolling window.
+        # Return a clean rejection rather than propagating NaN through criterion checks.
+        if any(pd.isna(v) for v in (price, s50, s150, s200)):
+            result["details"]["error"] = (
+                f"NaN in SMA computation for {ticker} — likely data gap in Close series"
+            )
+            return result
 
         # --- Criterion 1: price > SMA50 ---
         c1 = price > s50
