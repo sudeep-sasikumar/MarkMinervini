@@ -456,13 +456,24 @@ Complete chronological list across all sessions. See Section 4 for details per s
 - FTD loop used hardcoded range(3) instead of settings.FTD_MIN_DAY
 - 2 CI test failures fixed (yfinance not available in CI → mock data.fetcher)
 
+**Correctness and data quality fixes (Session 9):**
+- `get_portfolio_drawdown()` circuit breaker now works — was always 0.0 because open positions have NULL `pnl_gbp`; now fetches live prices
+- Dead code in `assess_post_earnings()` removed
+- Breadth monitor standalone fetch: `period="1y"` → `period="2y"` for reliable 200-SMA
+- Pocket pivot shift(1) off-by-one fixed — all 10 prior sessions now correctly evaluated
+- RS ratings now use IBD/Minervini weighted formula: `0.40*Q4 + 0.20*Q3 + 0.20*Q2 + 0.20*Q1`
+- `fx_rate_source` propagates true source ("live" | "cache" | "fallback" | "provided")
+- Breakeven stop move persists to DB — no longer refires same alert every post-market run
+
 ---
 
-## 6. Current System State (as of 24 May 2026 — Session 7)
+## 6. Current System State (as of 24 May 2026 — Session 9)
 
 **Latest commits (newest first):**
 ```
-[pending] Seventh review: 13 bug fixes — MIN_BASE fix, EPS acceleration, pocket pivot, morning briefing, watchlist cleanup, test fixes
+ada91be  Ninth review: 7 bug fixes — weighted RS, circuit breaker P&L, stop persistence
+36c8a74  Seventh review: 13 bug fixes + 50/50 tests passing
+c8f0ea8  Update HANDOFF.md: Session 6 log + mark fixed items
 4ffc6fe  Sixth review: 4 HIGH-priority fixes + fundamentals diagnostics
 4ea2d46  Add HANDOFF-24May.md
 c6bf3b0  Dashboard overhaul + startup cache clearing
@@ -492,6 +503,10 @@ bbd9ac3  Second review: 10 targeted fixes
 - Morning briefing near-pivot and weak-sectors now computed from live data
 - Stale watchlist entries auto-cleaned daily (14-day default)
 - Post-earnings miss auto-removes ticker from watchlist
+- Portfolio drawdown circuit breaker actually fires (live P&L, not NULL DB column)
+- RS ratings use IBD-weighted quarterly formula (not simple 12-month return)
+- Breakeven stop moves persist to DB (don't refire every post-market run)
+- Breadth monitor uses `period="2y"` for reliable 200-SMA calculation
 
 **What is still pending:**
 - Set `VPS_IP` in Hostinger Docker Manager
@@ -753,7 +768,7 @@ LOG_LEVEL              — INFO (default)
     "risk_pct": float,
     "stop_pct": float,
     "gbpusd_rate": float,
-    "fx_rate_source": str,         # "live" | "fallback"
+    "fx_rate_source": str,         # "live" | "cache" | "fallback" | "provided"
     "fx_warning": bool,            # True when source="fallback"
     "valid": bool,
     "note": str,
@@ -826,28 +841,26 @@ Job 2: build-and-push (needs: lint-and-test)
 
 ## 12. Known Remaining Issues & Next Steps
 
-### 12A. Immediate — Verify After Latest Redeploy
+### 12A. Immediate — Deploy & Verify
 
-1. **Click "🔄 Force Regime Refresh"** in dashboard sidebar after deploying `c6bf3b0`
-2. **Distribution days should recalculate** — with 0.2% minimum applied, count should be lower than 7. If still 7, these are genuine IBD-definition distribution days from the volatile April–May 2026 period and the BEAR call may be accurate (even though SPY is 10.5% above SMA200 — distribution days is a separate signal)
-3. **Sectors should show ✅** — XLK (+28.7% 3m), XLE (+8.7% 3m) should pass Stage 2
-4. **Dashboard SPY panel** should show price vs SMA200 with exact numbers
+1. **Push `ada91be` to GitHub** → CI runs → Docker rebuilds → pull new image on Hostinger
+2. **Click "🔄 Force Regime Refresh"** in dashboard sidebar after restart
+3. **Set `VPS_IP`** in Hostinger Docker Manager if not already done
+4. **Run a test scan** to verify weighted RS produces sensible rankings vs old simple 12-month return
 
 ### 12B. HIGH Priority — Next Session
 
 | Priority | File | Issue | Suggested Fix |
 |---|---|---|---|
-| ~~HIGH~~ ✅ | ~~`regime_detector.py`~~ | ~~Dist_days ≥ 5 alone triggers BEAR even when SPY is 10%+ above SMA200~~ | **FIXED in Session 6** — compound gate: full suppression only when SPY is also below SMA200 |
 | HIGH | Hostinger env vars | `VPS_IP` not yet set → dashboard links in Telegram show "YOUR_VPS_IP" | Add `VPS_IP=your_server_ip` in Hostinger Docker Manager |
-| ~~HIGH~~ ✅ | ~~`main.py`~~ | ~~No minimum universe coverage check~~ | **FIXED in Session 6** — aborts if <80% of universe loads |
-| ~~HIGH~~ ✅ | ~~`main.py`~~ | ~~`_get_ticker_sector()` called twice per ticker~~ | **FIXED in Session 6** — single call at top of inner loop |
+| HIGH | All files | Not yet deployed — `ada91be` only committed locally, not pushed | `git push` → wait for CI → pull new image on VPS |
 
 ### 12C. MEDIUM Priority
 
 | Priority | Item |
 |---|---|
 | MEDIUM | **Verify VCP calibration** — with `MIN_BASE_TRADING_DAYS=15`, more setups will qualify. Run a test scan to verify signal volume is sensible (not too many false positives) |
-| ~~MEDIUM~~ ✅ | ~~**`data/fundamentals.py`** — `_parse_quarterly` EPS label matching is fragile~~ | **FIXED Session 6** — DEBUG logs list IC labels on mismatch |
+| MEDIUM | **Verify weighted RS impact** — RS ratings will shift when `ada91be` is deployed; stocks that recently surged will rank higher. Compare top-20 RS list before/after |
 | MEDIUM | **`data/fetcher.py`** — No central Finnhub rate limiter. Only `fundamentals.py` has one now. If other modules call Finnhub directly they bypass it |
 | MEDIUM | **Run `python main.py --test-mode`** on VPS to confirm full pipeline end-to-end produces at least one watchlist candidate from live market data |
 | MEDIUM | **Paper trading phase** — system is built but never paper-traded. Run for 2–4 weeks to validate that stocks reaching score≥80 are genuinely setting up for breakouts |
@@ -860,8 +873,8 @@ Job 2: build-and-push (needs: lint-and-test)
 | LOW | Add regime-transition Telegram alerts ("BULL → NEUTRAL", "NEUTRAL → BEAR") so changes are visible without checking the dashboard |
 | LOW | `dashboard.py` System Status page — show next scheduled job fire times (APScheduler `scheduler.get_jobs()` returns next fire time) |
 | LOW | `backtesting/backtest.py` — walk-forward backtest built but never actually run against live VCP parameters to validate score≥80 threshold |
-| LOW | `screening/rs_calculator.py` — add minimum universe coverage gate (abort if <80% loaded) |
 | LOW | Weekly job (`job_weekly`) calls `analyse_management_quality()` but this is Ollama LLM — verify it doesn't time out when Ollama is offline |
+| LOW | Add tests for: weighted RS formula correctness, pocket_pivot shift(1) fix, stop_manager DB persistence |
 
 ---
 
@@ -944,11 +957,41 @@ Track each work session here. Add a new entry at the start of every new Claude C
 
 ---
 
-### Session 8 — (next session — fill in here)
-**Date:**
-**Focus:**
+### Session 8 — Eighth Review: code audit (7 bugs identified, no commits)
+**Date:** 24 May 2026 (new context window after Session 7)
+**Focus:** Brutal full-codebase review to find any remaining correctness issues
 **Outcome:**
-**Key commits:**
+- Identified 7 bugs (none fixed in this session — context ran out mid-implementation):
+  1. `get_portfolio_drawdown()` always returned 0.0 (reads NULL `pnl_gbp` for open positions)
+  2. Dead code `events = get_earnings_calendar(days_ahead=0)` in `assess_post_earnings()`
+  3. `breadth_monitor.py` standalone fetch used `period="1y"` (borderline for 200-SMA)
+  4. `pocket_pivot.py` shift(1) off-by-one — first of 10 prior sessions never evaluated
+  5. RS calculator used unweighted 12-month return (should be IBD 40/20/20/20 quarterly weights)
+  6. `fx_rate_source` shows "live" for cached rates (source not propagated from `fetch_gbpusd_with_source`)
+  7. `stop_manager.py` "MOVE TO BREAKEVEN" never persisted new stop to DB — refires every run
+- Session 7 fixes (from `36c8a74`) confirmed working: all 50 tests passing at session start
+**Key commits:** None (session ended mid-implementation)
+
+---
+
+### Session 9 — Ninth Review: 7 bug fixes
+**Date:** 24 May 2026 (new context window after Session 8)
+**Focus:** Implement all 7 bugs identified in Session 8
+
+**Fixes applied:**
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | `risk/position_sizer.py` | `get_portfolio_drawdown()` always returned 0.0 — read `pnl_gbp` from DB (always NULL for open positions) | Rewritten: fetches live prices via `fetch_latest_price()`, computes unrealised P&L in USD, converts via `fetch_gbpusd()` — circuit breaker now actually fires |
+| 2 | `data/earnings_calendar.py` | Dead code: `events = get_earnings_calendar(days_ahead=0)` called in `assess_post_earnings()` but result never used | Removed dead assignment |
+| 3 | `market_intelligence/breadth_monitor.py` | Standalone fetch used `period="1y"` — insufficient for reliable 200-SMA when tickers have gaps | Changed to `period="2y"` |
+| 4 | `patterns/pocket_pivot.py` | `prior_10 = df.iloc[-11:-1]` then `shift(1)` — first row produces NaN, first session never classified as down day → max down-vol computed from only 9 sessions | Fixed to `df.iloc[-12:-1]` so all 10 prior sessions are evaluated |
+| 5 | `screening/rs_calculator.py` | Simple 12-month return gives equal quarterly weight; recent surges are understated | Implemented IBD/Minervini weighted formula: `rs_raw = 0.40*Q4 + 0.20*Q3 + 0.20*Q2 + 0.20*Q1` (fully vectorised, no per-ticker loop) |
+| 6 | `risk/position_sizer.py` | `fx_rate_source` showed "live" for cached rates (only "fallback" was caught) | Now propagates actual source string from `fetch_gbpusd_with_source()`: "live" \| "cache" \| "fallback" \| "provided" |
+| 7 | `risk/stop_manager.py` | "MOVE TO BREAKEVEN" suggestion generated alert but never wrote new `stop_price` to `positions` table — same alert refired on every post-market run | Persists new stop via `db_session()` before appending alert to return list |
+
+**Test result: 50/50 passing**
+**Key commits:** `ada91be`
 
 ---
 
