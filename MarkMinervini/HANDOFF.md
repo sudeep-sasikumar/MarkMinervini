@@ -465,12 +465,20 @@ Complete chronological list across all sessions. See Section 4 for details per s
 - `fx_rate_source` propagates true source ("live" | "cache" | "fallback" | "provided")
 - Breakeven stop move persists to DB — no longer refires same alert every post-market run
 
+**Backtest crash + correctness fixes (Session 10):**
+- **Backtest crash (root cause):** `fetch_ohlcv_batch()` did not strip timezone from `yf.download()` bulk results. yfinance 0.2.x+ returns a tz-aware UTC index; the single-ticker path (`_fetch_yfinance`) already strips tz via `tz_localize(None)`. When `_run_single_window` sliced `df.loc[:current_date]` with a tz-naive timestamp from `spy_period.index` against a tz-aware ticker DataFrame → `TypeError: Cannot compare tz-naive and tz-aware datetime-like objects`. Fix: normalise tz in `fetch_ohlcv_batch` for every extracted ticker.
+- **Exit equity formula wrong:** `equity += shares * (exit_price - entry)` adds only P&L but entry cost was already deducted at open — double-subtracts entry, depleting equity at 2× the correct rate every stop-loss. Fix: `equity += shares * exit_price` (add back full exit proceeds).
+- **MTM missing at max-positions gate:** when `len(open_positions) >= MAX_POSITIONS`, code did `equity_series[date] = equity; continue` — cash only, no open position mark-to-market. Fix: always call `_mark_to_market()` before `continue`.
+- **RS rank O(n²) with tie bug:** `sorted_rs.index(v)` is O(n) per ticker and returns the first-occurrence index for tied values. Fix: numpy `argsort` (O(n log n), correct tie-handling). Also updated inline RS to IBD-weighted formula to match the live system.
+
 ---
 
-## 6. Current System State (as of 24 May 2026 — Session 9)
+## 6. Current System State (as of 24 May 2026 — Session 10)
 
 **Latest commits (newest first):**
 ```
+a75f796  Tenth review: fix backtest crash + 3 correctness bugs
+69d0114  Update HANDOFF.md: Sessions 8 & 9 log
 ada91be  Ninth review: 7 bug fixes — weighted RS, circuit breaker P&L, stop persistence
 36c8a74  Seventh review: 13 bug fixes + 50/50 tests passing
 c8f0ea8  Update HANDOFF.md: Session 6 log + mark fixed items
@@ -478,12 +486,6 @@ c8f0ea8  Update HANDOFF.md: Session 6 log + mark fixed items
 4ea2d46  Add HANDOFF-24May.md
 c6bf3b0  Dashboard overhaul + startup cache clearing
 8cac696  Fifth review: 16 bug fixes (false BEAR alert, weekend scheduler, sector gate)
-ed8f87c  Fix test_vcp_gating.py: correct detect_vcp() call signature
-2c75bfb  Add CI compile check, unit test suite, and lint-and-test gate
-f247607  Fourth review: FX truthfulness, intraday stop_pct, macro warning
-3f45f96  Third review P0 fixes: GBP/USD display, intraday msg, SQLite migrations
-bbd9ac3  Second review: 10 targeted fixes
-[initial] Full 48-file system build
 ```
 
 **What is working:**
@@ -507,10 +509,13 @@ bbd9ac3  Second review: 10 targeted fixes
 - RS ratings use IBD-weighted quarterly formula (not simple 12-month return)
 - Breakeven stop moves persist to DB (don't refire every post-market run)
 - Breadth monitor uses `period="2y"` for reliable 200-SMA calculation
+- **Backtest crash fixed** — tz-aware/tz-naive mismatch resolved; exit equity formula correct; MTM always includes open positions; RS rank O(n log n)
 
 **What is still pending:**
 - Set `VPS_IP` in Hostinger Docker Manager
+- Pull new Docker image on VPS and restart container (commit `a75f796` pushed)
 - Run test scan on VPS to verify signal generation with MIN_BASE_TRADING_DAYS=15
+- Run backtest from dashboard to verify it completes successfully
 
 ---
 
@@ -843,10 +848,11 @@ Job 2: build-and-push (needs: lint-and-test)
 
 ### 12A. Immediate — Deploy & Verify
 
-1. **Push `ada91be` to GitHub** → CI runs → Docker rebuilds → pull new image on Hostinger
+1. **Pull new Docker image on Hostinger** — commit `a75f796` already pushed; wait for CI (2–3 min) then pull + restart
 2. **Click "🔄 Force Regime Refresh"** in dashboard sidebar after restart
 3. **Set `VPS_IP`** in Hostinger Docker Manager if not already done
-4. **Run a test scan** to verify weighted RS produces sensible rankings vs old simple 12-month return
+4. **Run the backtest** from the dashboard to verify it completes without a crash
+5. **Run a test scan** to verify weighted RS produces sensible rankings vs the old simple 12-month formula
 
 ### 12B. HIGH Priority — Next Session
 
@@ -992,6 +998,29 @@ Track each work session here. Add a new entry at the start of every new Claude C
 
 **Test result: 50/50 passing**
 **Key commits:** `ada91be`
+
+---
+
+### Session 10 — Tenth Review: Backtest crash fix + 3 correctness bugs
+**Date:** 24 May 2026 (new context window after Session 9)
+**Trigger:** User reported backtest crashing at "Bulk downloading OHLCV for 72 tickers" with no error shown; session 9 had committed 7 fixes but not the backtest fixes (session crashed mid-work).
+**Focus:** Diagnose backtest crash; fix all bugs found; confirm prior session's uncommitted work and commit it.
+
+**Status check at session start:**
+- Sessions 9's 7 fixes confirmed committed in `ada91be` ✅
+- Two files had uncommitted changes: `backtesting/backtest.py` and `data/fetcher.py` (the backtest fixes from this session, applied before context was lost)
+
+**Backtest bugs found and fixed:**
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | `data/fetcher.py` | `fetch_ohlcv_batch()` didn't strip timezone from `yf.download()` bulk results → `TypeError: Cannot compare tz-naive and tz-aware datetime-like objects` when backtest sliced `df.loc[:current_date]` — the root cause of the backtest crash | Added `if getattr(df.index, "tz", None) is not None: df.index = df.index.tz_localize(None)` in the per-ticker extraction loop |
+| 2 | `backtesting/backtest.py` | Exit equity formula: `equity += shares * (exit_price - entry)` adds only P&L; entry cost was already deducted at position open → double-subtracted; every stop loss depleted equity at 2× the correct rate | Changed to `equity += shares * exit_price` (add back full exit proceeds) for both stop-hit and time-based exits |
+| 3 | `backtesting/backtest.py` | At max-positions gate: `equity_series[date] = equity; continue` stored cash only, dropping open position MTM from equity curve on max-position days | Extracted `_mark_to_market()` helper; always called before `continue` |
+| 4 | `backtesting/backtest.py` | RS rank: `sorted_rs.index(v)` is O(n) per ticker (O(n²) total) with tie-mishandling | Replaced with numpy `argsort` (O(n log n), correct ties); also updated to IBD-weighted quarterly RS formula to match live system |
+
+**Test result: 50/50 passing**
+**Key commits:** `a75f796` (pushed to GitHub — CI running)
 
 ---
 
