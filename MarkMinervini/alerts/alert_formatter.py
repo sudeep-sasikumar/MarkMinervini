@@ -51,8 +51,8 @@ def format_breakout_alert(
     gm_now = fundamentals.get("gross_margin_current")
     gm_prior = fundamentals.get("gross_margin_prior")
 
-    eps_str = f"+{eps_growth:.0f}%" if eps_growth else "N/A"
-    rev_str = f"+{rev_growth:.0f}%" if rev_growth else "N/A"
+    eps_str = f"+{eps_growth:.0f}%" if eps_growth is not None else "N/A"
+    rev_str = f"+{rev_growth:.0f}%" if rev_growth is not None else "N/A"
     margin_str = "Expanding ✅" if (gm_now and gm_prior and gm_now >= gm_prior) else "Flat/Contracting"
 
     # AI sentiment
@@ -73,7 +73,15 @@ def format_breakout_alert(
     contractions = vcp.get("contractions", [])
     contraction_depths = "→".join(f"{c['depth_pct']:.0f}%" for c in contractions)
 
-    # RS line new high flag
+    # Volume dry-up: read from VCP steps dict rather than hardcoding ✅
+    steps = vcp.get("steps", {})
+    vol_dry_up_days = steps.get("volume_dry_up_days", 0)
+    vol_dry_up_str = "✅" if vol_dry_up_days >= 3 else f"⚠️ ({vol_dry_up_days}/5 days)"
+
+    # Pocket pivot bonus
+    pocket_pivot_str = " | Pocket Pivot ✅" if steps.get("pocket_pivot_bonus") else ""
+
+    # RS line new high flag — shown in trend section only (not duplicated in VCP section)
     rs_line_str = "RS Line: NEW HIGH ✅" if rs_line_new_high else f"RS Rating: {rs_rating:.0f}"
 
     # SMA200 info
@@ -123,7 +131,7 @@ def format_breakout_alert(
         f"\n"
         f"📈 VCP: {len(contractions)} contractions [{contraction_depths}]\n"
         f"  Base: {vcp.get('base_days', 0) // 5:.1f} weeks | "
-        f"Vol dry-up ✅ | {rs_line_str}\n"
+        f"Vol dry-up {vol_dry_up_str}{pocket_pivot_str}\n"
         f"\n"
         f"📍 SETUP:\n"
         f"  Entry:    ${entry:.2f}\n"
@@ -170,7 +178,7 @@ def format_morning_briefing(
     from datetime import date, datetime
     import pytz
 
-    today = date.today().strftime("%A %-d %B %Y")
+    today = date.today().strftime("%A %d %B %Y").replace(" 0", " ")
     _vps_ip = vps_ip or settings.VPS_IP
 
     # Compute accurate time-to-open so the message is factually correct.

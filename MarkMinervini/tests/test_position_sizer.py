@@ -92,21 +92,29 @@ class TestFXConversion:
     def test_fallback_fx_source_sets_warning(self):
         """When fetch_gbpusd_with_source() returns source='fallback', fx_warning=True."""
         mock_fallback = {"rate": 1.27, "source": "fallback"}
-        # Patch the function on the data.fetcher module.  position_sizer imports
-        # it lazily (inside the function body) so this patch is sufficient.
-        with patch("data.fetcher.fetch_gbpusd_with_source", return_value=mock_fallback):
+        # position_sizer imports fetch_gbpusd_with_source lazily (inside the function
+        # body) via `from data.fetcher import ...`.  We insert a fake data.fetcher
+        # module into sys.modules so the import resolves without needing yfinance.
+        import sys
+        from unittest.mock import MagicMock
+        fake_fetcher = MagicMock()
+        fake_fetcher.fetch_gbpusd_with_source.return_value = mock_fallback
+        with patch.dict(sys.modules, {"data.fetcher": fake_fetcher}):
             result = compute_position_size(
                 entry_price=100.0,
                 stop_price=94.0,
                 account_equity=50_000,
-                # No gbpusd_rate supplied — forces internal fetch
             )
         assert result["fx_warning"] is True
 
     def test_live_fx_source_no_warning(self):
         """When fetch_gbpusd_with_source() returns source='live', fx_warning=False."""
         mock_live = {"rate": 1.28, "source": "live"}
-        with patch("data.fetcher.fetch_gbpusd_with_source", return_value=mock_live):
+        import sys
+        from unittest.mock import MagicMock
+        fake_fetcher = MagicMock()
+        fake_fetcher.fetch_gbpusd_with_source.return_value = mock_live
+        with patch.dict(sys.modules, {"data.fetcher": fake_fetcher}):
             result = compute_position_size(
                 entry_price=100.0,
                 stop_price=94.0,

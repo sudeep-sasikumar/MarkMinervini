@@ -152,6 +152,8 @@ def job_data_refresh():
         from data.fetcher import fetch_ohlcv_batch
         from screening.rs_calculator import compute_rs_ratings
         from market_intelligence.breadth_monitor import compute_breadth
+        from database.db import cleanup_stale_watchlist
+        from config import settings as _settings
 
         purge_expired()
         universe = get_universe()
@@ -159,6 +161,11 @@ def job_data_refresh():
 
         rs_df = compute_rs_ratings(price_data)
         breadth = compute_breadth(price_data)
+
+        # Remove watchlist entries that haven't been refreshed recently.
+        # The full scan runs after this job and will re-add any stock that
+        # still qualifies — so stale entries are ones the scanner stopped confirming.
+        cleanup_stale_watchlist(max_age_days=_settings.WATCHLIST_MAX_AGE_DAYS)
 
         logger.info("Data refresh complete: %d tickers, breadth=%.1f%%",
                     len(price_data), breadth)
@@ -213,34 +220,72 @@ def job_morning_briefing():
     logger.info("=== JOB: Morning Briefing ===")
     try:
         from market_intelligence.regime_detector import detect_regime
-        from market_intelligence.sector_analyzer import get_leading_sectors
-        from database.db import get_connection
-        from alerts.alert_formatter import format_morning_briefing
+        from market_intelligence.sector_analyzer import get_leading_sectors, fetch_sector_performance
+        from database.db import get_connection, remove_watchlist_ticker
+        from alerts.alert_formatter import format_morning_briefing, format_earnings_assessment
         from alerts.telegram_bot import send_message
-        from data.earnings_calendar import earnings_safety_status
+        from data.earnings_calendar import earnings_safety_status, assess_post_earnings
+        from data.fetcher import fetch_latest_price
+        from config import settings as _settings
 
         regime = detect_regime()
         leaders = get_leading_sectors(3)
-        weak_sectors = []  # simplified — caller can enrich
+
+        # Weak sectors: those whose ETF is NOT in Stage 2 (or declining 3m performance)
+        sector_perf = fetch_sector_performance()
+        weak_sectors = [
+            s for s, d in sector_perf.items()
+            if not d.get("stage2", False) or d.get("3m_pct", 0) < 0
+        ]
 
         conn = get_connection()
-        watchlist = conn.execute("SELECT ticker FROM watchlist").fetchall()
+        watchlist_rows = conn.execute(
+            "SELECT ticker, pivot_price FROM watchlist WHERE pivot_price IS NOT NULL"
+        ).fetchall()
         conn.close()
 
-        watch_list = [r["ticker"] for r in watchlist]
+        watch_list = [r["ticker"] for r in watchlist_rows]
         near_pivot = []
         earnings_blocked = []
 
-        for ticker in watch_list:
+        for row in watchlist_rows:
+            ticker = row["ticker"]
+            pivot = row["pivot_price"]
+
+            # Near-pivot check: live price within ±5% of stored pivot
+            if pivot:
+                try:
+                    price = fetch_latest_price(ticker)
+                    if price and abs(price / pivot - 1) <= _settings.NEAR_PIVOT_THRESHOLD:
+                        near_pivot.append(ticker)
+                except Exception:
+                    pass
+
+            # Earnings block check
             status = earnings_safety_status(ticker)
             if status["action"] == "block":
                 earnings_blocked.append(ticker)
+
+        # Post-earnings assessment: flag beats and remove misses from watchlist
+        assessments = []
+        for ticker in watch_list:
+            try:
+                result = assess_post_earnings(ticker)
+                if result:
+                    assessments.append(result)
+                    if result["verdict"] == "EARNINGS MISS":
+                        remove_watchlist_ticker(ticker)
+                        logger.info("Watchlist: removed %s after earnings miss", ticker)
+            except Exception as exc:
+                logger.debug("Post-earnings check failed for %s: %s", ticker, exc)
+
+        if assessments:
+            send_message(format_earnings_assessment(assessments))
 
         # Fetch live economic events for this morning's briefing
         from data.economic_calendar import get_high_impact_events
         economic_events = get_high_impact_events(days_ahead=2)
 
-        from config import settings as _settings
         msg = format_morning_briefing(
             regime=regime,
             watchlist=watch_list,

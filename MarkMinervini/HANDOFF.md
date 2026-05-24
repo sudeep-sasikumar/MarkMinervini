@@ -161,7 +161,8 @@ MarkMinervini/
 ├── patterns/
 │   ├── vcp_detector.py         12-step VCP algorithm. Score 0–100. Alert gate:
 │   │                           score ≥ 80 AND breakout confirmed (close > pivot,
-│   │                           volume ≥ 1.4× avg). MIN_BASE_TRADING_DAYS = 60.
+│   │                           volume ≥ 1.4× avg). MIN_BASE_TRADING_DAYS = 15
+│   │                           (3-week Minervini minimum). Pocket pivot bonus +5.
 │   │                           Watchlist candidate: score ≥ 70.
 │   │
 │   ├── pivot_calculator.py     enrich_vcp_result() — adds pivot zone detail,
@@ -228,6 +229,33 @@ MarkMinervini/
 ---
 
 ## 4. Full Build History
+
+### Session 7 — Seventh Review: 13 bug fixes (24 May 2026 — new context window)
+
+**Trigger:** Resuming from Session 6 handoff. Brutal code review of the full codebase.
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | `config/settings.py` | `MIN_BASE_TRADING_DAYS=60` was wrong — Session 5 confused the lookback window (60–120 days) with the minimum base duration | Corrected to `15` (3 trading weeks per Minervini master prompt) |
+| 2 | `config/settings.py` | `POCKET_PIVOT_BONUS`, `WATCHLIST_MAX_AGE_DAYS`, `NEAR_PIVOT_THRESHOLD`, `EPS_ACCELERATION_SCORE` constants missing | Added all four |
+| 3 | `patterns/vcp_detector.py` | Pocket pivot detector was built but never integrated into VCP scoring — always dormant | Added `_check_pocket_pivot_bonus()` call in scoring loop; +5 to score when detected in last 5 days |
+| 4 | `data/fundamentals.py` | EPS acceleration (current Q growth > prior Q growth) was never scored | Added `eps_growth_prior_yoy` and `eps_accelerating` fields; `+2` score bonus |
+| 5 | `alerts/alert_formatter.py` | `if eps_growth:` → falsy when EPS=0.0 — showed "N/A" for real zero-growth stocks | Fixed to `if eps_growth is not None` (same for `rev_growth`) |
+| 6 | `alerts/alert_formatter.py` | `strftime("%-d")` Linux-only — crashes on Windows/Docker alpine | Fixed to `strftime("%d").replace(" 0", " ")` (cross-platform) |
+| 7 | `alerts/alert_formatter.py` | `vol_dry_up_str` was hardcoded `✅` — never actually showed warning even when vol dry-up failed | Now reads `volume_dry_up_days` from `vcp.steps` dict |
+| 8 | `alerts/alert_formatter.py` | Pocket pivot never shown in alert message | Added `pocket_pivot_str` from `vcp.steps["pocket_pivot_bonus"]` |
+| 9 | `market_intelligence/regime_detector.py` | VIX fetch failure silently defaulted to 20 with no user warning | Added explicit `logger.warning()` when `fetch_vix()` returns None |
+| 10 | `market_intelligence/regime_detector.py` | FTD loop used hardcoded `range(3, ...)` instead of `settings.FTD_MIN_DAY` | Fixed to `range(settings.FTD_MIN_DAY - 1, len(sub))` |
+| 11 | `database/db.py` | Watchlist entries never removed — stale setups accumulate indefinitely | Added `cleanup_stale_watchlist(max_age_days)` and `remove_watchlist_ticker()` |
+| 12 | `scheduler/job_runner.py` | `job_data_refresh` never cleaned stale watchlist | Now calls `cleanup_stale_watchlist(max_age_days=WATCHLIST_MAX_AGE_DAYS)` daily |
+| 13 | `scheduler/job_runner.py` | `job_morning_briefing` always sent empty `near_pivot=[]` and `weak_sectors=[]` — both hardcoded | Rewritten: near-pivot computes live prices vs stored pivot (±5%); weak-sectors from actual sector performance; post-earnings verdict removes misses from watchlist |
+| 14 | `tests/test_position_sizer.py` | 2 tests failed (`test_fallback_fx_sets_warning`, `test_live_fx_source_no_warning`) — `data.fetcher` not importable in CI (yfinance missing) | Fixed with `patch.dict(sys.modules, {"data.fetcher": MagicMock(...)})` — injects fake module without needing yfinance |
+
+**Test result:** 50/50 passing (was 42/50 on session start — 8 failures)
+
+**Key commits:** (pending commit)
+
+---
 
 ### Session 6 — Sixth Review: 4 HIGH-priority fixes + Fundamentals Diagnostics (24 May 2026 — new session)
 
@@ -410,17 +438,31 @@ Complete chronological list across all sessions. See Section 4 for details per s
 - Sector period=1y (insufficient for 200-SMA)
 - Morning briefing hardcoded "~1h" time string
 - Bear mode stopped all scanning (not just alerts)
-- VCP minimum base 15 days instead of 60
+- MIN_BASE_TRADING_DAYS set to 60 (Session 5 error — confused lookback with base minimum)
 - Finnhub rate limiter missing in fundamentals
 - Alpha Vantage wrong endpoint for EPS
 - NaN propagation in trend template
 
+**Scoring and signal quality fixes (Session 7):**
+- MIN_BASE_TRADING_DAYS corrected from 60 → 15 (3-week Minervini minimum)
+- Pocket pivot detector integrated into VCP scoring (+5 bonus)
+- EPS acceleration scoring added (+2 bonus)
+- vol_dry_up_str was hardcoded ✅ regardless of actual vol dry-up
+- eps_str/rev_str falsy check on zero-growth stocks
+- Morning briefing near_pivot and weak_sectors hardcoded as empty — now computed live
+- Post-earnings miss removes stock from watchlist automatically
+- Stale watchlist entries now cleaned daily
+- VIX fetch failure now logs explicit warning instead of silently defaulting
+- FTD loop used hardcoded range(3) instead of settings.FTD_MIN_DAY
+- 2 CI test failures fixed (yfinance not available in CI → mock data.fetcher)
+
 ---
 
-## 6. Current System State (as of 24 May 2026 — Session 6)
+## 6. Current System State (as of 24 May 2026 — Session 7)
 
 **Latest commits (newest first):**
 ```
+[pending] Seventh review: 13 bug fixes — MIN_BASE fix, EPS acceleration, pocket pivot, morning briefing, watchlist cleanup, test fixes
 4ffc6fe  Sixth review: 4 HIGH-priority fixes + fundamentals diagnostics
 4ea2d46  Add HANDOFF-24May.md
 c6bf3b0  Dashboard overhaul + startup cache clearing
@@ -436,7 +478,7 @@ bbd9ac3  Second review: 10 targeted fixes
 **What is working:**
 - Full scanner pipeline (universe → trend → fundamentals → VCP → alerts)
 - Intraday breakout engine (5m bars, volume projection, deduplication)
-- Regime detection with correct IBD distribution day counting
+- Regime detection with correct IBD distribution day counting and compound dist-day gate
 - Breadth now flows correctly into regime
 - Sectors correctly evaluated (rs_rating=100 for ETFs)
 - All weekday scheduler jobs restricted to Mon–Fri
@@ -445,14 +487,15 @@ bbd9ac3  Second review: 10 targeted fixes
 - Startup cache clearing ensures fresh data after redeploy
 - Force Refresh button in dashboard sidebar
 - CI pipeline: compileall + pytest before Docker build
-- Unit tests: 30+ tests across 3 test files
+- Unit tests: **50 tests across 3 test files — all passing**
+- VCP scoring now includes pocket pivot bonus (+5) and EPS acceleration (+2)
+- Morning briefing near-pivot and weak-sectors now computed from live data
+- Stale watchlist entries auto-cleaned daily (14-day default)
+- Post-earnings miss auto-removes ticker from watchlist
 
-**What was observed on 24 May deployment:**
-- Distribution days showing 7/5 even after the 0.2% fix was deployed
-- Sectors still showing ❌ after deployment
-- **Root cause**: SQLite cache persisted old values across Docker restart
-- **Fix deployed**: startup cache clearing in main.py + Force Refresh button
-- **Action required**: After next redeploy, click "🔄 Force Regime Refresh" in sidebar
+**What is still pending:**
+- Set `VPS_IP` in Hostinger Docker Manager
+- Run test scan on VPS to verify signal generation with MIN_BASE_TRADING_DAYS=15
 
 ---
 
@@ -522,7 +565,8 @@ Every 15 min, 13:30–21:00 BST Mon–Fri:
 ```
 Step 1:  Trend Template must pass (hard gate, not scored)
 Step 2:  Prior advance ≥ 30% before base (hard gate)
-Step 3:  Base length ≥ 60 trading days (MIN_BASE_TRADING_DAYS)
+Step 3:  Base length ≥ 15 trading days (MIN_BASE_TRADING_DAYS = 3 weeks minimum)
+         [Search window is MAX_BASE_TRADING_DAYS = 120 days — different concept]
 Step 4:  Identify contractions (swing-point high/low pairs)
 Step 5:  Contraction series must tighten (each < 85% of prior depth)
          ≥ 3 contractions: +25 pts
@@ -536,6 +580,7 @@ Step 7:  ATR collapse in pivot zone (last 5–15 days)
 Step 8:  Volume dry-up in final 5 days (< 3 of 5 under avg: -10 pts)
 Step 9:  No wide-and-loose bars in pivot zone (>3% daily range: -15 pts)
 Step 10: RS line new high bonus: +10 pts
+         Pocket pivot bonus: +5 pts (if fired in last 5 sessions)
 Step 11: Entry = pivot + $0.05; Stop = pivot_zone_low × 0.995
          Stop > 8%: reject (risk_valid=False)
 Step 12: Gap-up filter: open > pivot × 1.05: reject (MISSED)
@@ -580,8 +625,9 @@ ROE_MIN = 17           # % (scored, not hard gate)
 
 # VCP
 VCP_SCORE_MIN = 80
-MIN_BASE_TRADING_DAYS = 60      # CRITICAL — was wrongly 15 (MIN_BASE_WEEKS×5) before fix
-MAX_BASE_TRADING_DAYS = 120
+MIN_BASE_TRADING_DAYS = 15      # 3-week Minervini minimum (search window is MAX_BASE_TRADING_DAYS)
+MAX_BASE_TRADING_DAYS = 120     # look-back SEARCH window — different from minimum duration
+POCKET_PIVOT_BONUS = 5          # VCP score bonus if pocket pivot confirmed in last 5 days
 MIN_CONTRACTIONS = 2
 BREAKOUT_VOLUME_RATIO = 1.4
 BREAKOUT_STRONG_VOLUME = 2.0
@@ -616,6 +662,11 @@ PORTFOLIO_DRAWDOWN_STOP = 0.30      # 0% (no new positions)
 # Earnings safety
 EARNINGS_BLOCK_DAYS = 5
 EARNINGS_WARNING_DAYS = 14
+
+# Watchlist / signal quality
+WATCHLIST_MAX_AGE_DAYS = 14     # auto-remove stale watchlist entries
+NEAR_PIVOT_THRESHOLD = 0.05     # within 5% of pivot = "near pivot"
+EPS_ACCELERATION_SCORE = 2      # bonus when EPS growth accelerating Q-over-Q
 
 # Account
 ACCOUNT_EQUITY_GBP = float(os.getenv(..., 50000))
@@ -795,9 +846,9 @@ Job 2: build-and-push (needs: lint-and-test)
 
 | Priority | Item |
 |---|---|
-| MEDIUM | **Verify VCP score ≥ 80 calibration** — `MIN_BASE_TRADING_DAYS=60` is stricter (was 15). Fewer setups will pass Step 3. May need to run a test scan to verify we still get watchlist candidates |
-| ~~MEDIUM~~ ✅ | ~~**`data/fundamentals.py`** — `_parse_quarterly` EPS label matching is fragile. Should log how often `eps_growth_yoy` returns None~~ | **FIXED in Session 6** — DEBUG logs now list available IC labels on every mismatch and AV fallback trigger |
-| MEDIUM | **`data/fetcher.py`** — No central Finnhub rate limiter. Only `fundamentals.py` has one now. If other modules ever call Finnhub directly they bypass it |
+| MEDIUM | **Verify VCP calibration** — with `MIN_BASE_TRADING_DAYS=15`, more setups will qualify. Run a test scan to verify signal volume is sensible (not too many false positives) |
+| ~~MEDIUM~~ ✅ | ~~**`data/fundamentals.py`** — `_parse_quarterly` EPS label matching is fragile~~ | **FIXED Session 6** — DEBUG logs list IC labels on mismatch |
+| MEDIUM | **`data/fetcher.py`** — No central Finnhub rate limiter. Only `fundamentals.py` has one now. If other modules call Finnhub directly they bypass it |
 | MEDIUM | **Run `python main.py --test-mode`** on VPS to confirm full pipeline end-to-end produces at least one watchlist candidate from live market data |
 | MEDIUM | **Paper trading phase** — system is built but never paper-traded. Run for 2–4 weeks to validate that stocks reaching score≥80 are genuinely setting up for breakouts |
 
@@ -874,7 +925,26 @@ Track each work session here. Add a new entry at the start of every new Claude C
 
 ---
 
-### Session 7 — (next session — fill in here)
+### Session 7 — Seventh Review: 13 bug fixes + test fixes
+**Date:** 24 May 2026 (new context window after Session 6)
+**Focus:** Brutal code review; pocket pivot integration; EPS acceleration; morning briefing live data; watchlist cleanup; test fixes
+**Outcome:**
+- `MIN_BASE_TRADING_DAYS` corrected 60→15 (Session 5 error: search window ≠ minimum base duration)
+- Pocket pivot detector finally integrated into VCP scoring as +5 bonus
+- EPS acceleration (+2 bonus) added to fundamentals scoring
+- Morning briefing: near-pivot list now computes live prices vs stored pivot (±5%); weak sectors computed from sector performance data; post-earnings misses auto-removed from watchlist
+- Stale watchlist entries auto-cleaned daily via `cleanup_stale_watchlist()`
+- VIX fetch failure now logs explicit warning (was silently defaulting to 20.0)
+- FTD loop uses `settings.FTD_MIN_DAY` constant (was hardcoded range(3))
+- `eps_str`/`rev_str` falsy bug fixed (zero-growth now shows `+0%` not `N/A`)
+- `vol_dry_up_str` reads actual `volume_dry_up_days` from VCP steps (was hardcoded ✅)
+- 2 CI test failures fixed: mock `data.fetcher` module via `patch.dict(sys.modules, ...)`
+- **Test result: 50/50 passing**
+**Key commits:** (pending — committed at start of Session 8)
+
+---
+
+### Session 8 — (next session — fill in here)
 **Date:**
 **Focus:**
 **Outcome:**

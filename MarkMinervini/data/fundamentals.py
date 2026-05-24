@@ -121,6 +121,8 @@ def _build_fundamentals(ticker: str) -> dict:
         "ticker": ticker,
         "status": "unknown",
         "eps_growth_yoy": None,
+        "eps_growth_prior_yoy": None,  # prior quarter's YoY growth (for acceleration check)
+        "eps_accelerating": False,     # True if current quarter's growth > prior quarter's
         "rev_growth_yoy": None,
         "gross_margin_current": None,
         "gross_margin_prior": None,
@@ -172,8 +174,18 @@ def _build_fundamentals(ticker: str) -> dict:
     )
     base["passes_hard_gates"] = eps_ok and rev_ok and margin_ok
 
+    # --- EPS acceleration: current quarter's YoY growth > prior quarter's YoY growth ---
+    # Requires both eps_growth_yoy (q0 vs q4) and eps_growth_prior_yoy (q1 vs q5).
+    if (base["eps_growth_yoy"] is not None and
+            base["eps_growth_prior_yoy"] is not None and
+            base["eps_growth_yoy"] > base["eps_growth_prior_yoy"]):
+        base["eps_accelerating"] = True
+
     # --- Compute scored additions (0–10) ---
     score = 0
+    # EPS acceleration: +2 (master prompt specifies this explicitly)
+    if base["eps_accelerating"]:
+        score += settings.EPS_ACCELERATION_SCORE
     if base["eps_growth_annual"] is not None and base["eps_growth_annual"] >= 25:
         score += 1
     if base["roe"] is not None and base["roe"] >= settings.ROE_MIN:
@@ -201,12 +213,26 @@ def _build_fundamentals(ticker: str) -> dict:
 
 
 def _parse_quarterly(reports: list, base: dict) -> None:
-    """Extract QoQ EPS/revenue growth from Finnhub reported financials."""
+    """
+    Extract YoY EPS/revenue growth from Finnhub reported financials.
+
+    Quarters indexed (sorted descending by period):
+        q0 = most recent quarter
+        q1 = one quarter prior (for acceleration: compare q0 growth vs q1 growth)
+        q4 = same quarter last year (vs q0)
+        q5 = same quarter last year vs q1 (for prior-year comparison)
+    """
     try:
         # Sort by period descending — most recent first
         reports.sort(key=lambda r: r.get("period", ""), reverse=True)
         if len(reports) < 5:
             return
+
+        _EPS_LABELS = ["eps", "earnings per share", "diluted eps",
+                       "basic eps", "earningspersharediluted"]
+        _REV_LABELS = ["revenue", "revenues", "net revenue",
+                       "total revenue", "salesrevenuenet"]
+        _GP_LABELS  = ["gross profit", "grossprofit"]
 
         def _find(report, names):
             """Search income statement concepts by label."""
@@ -218,25 +244,17 @@ def _parse_quarterly(reports: list, base: dict) -> None:
         q0 = reports[0]  # most recent quarter
         q4 = reports[4]  # same quarter last year
 
-        eps_now = _find(q0, ["eps", "earnings per share", "diluted eps",
-                              "basic eps", "earningspersharediluted"])
-        eps_ly = _find(q4, ["eps", "earnings per share", "diluted eps",
-                             "basic eps", "earningspersharediluted"])
-        rev_now = _find(q0, ["revenue", "revenues", "net revenue",
-                              "total revenue", "salesrevenuenet"])
-        rev_ly = _find(q4, ["revenue", "revenues", "net revenue",
-                             "total revenue", "salesrevenuenet"])
-        gp_now = _find(q0, ["gross profit", "grossprofit"])
-        gp_ly = _find(q4, ["gross profit", "grossprofit"])
+        eps_now = _find(q0, _EPS_LABELS)
+        eps_ly  = _find(q4, _EPS_LABELS)
+        rev_now = _find(q0, _REV_LABELS)
+        rev_ly  = _find(q4, _REV_LABELS)
+        gp_now  = _find(q0, _GP_LABELS)
+        gp_ly   = _find(q4, _GP_LABELS)
 
         if eps_now is not None and eps_ly is not None and eps_ly != 0:
             base["eps_growth_yoy"] = (eps_now - eps_ly) / abs(eps_ly) * 100
         else:
-            # Log available IC labels so we can extend the search list if needed.
-            # This is the most common silent failure — Finnhub label varies by company.
-            q0_labels = [
-                c.get("label", "") for c in q0.get("report", {}).get("ic", [])
-            ]
+            q0_labels = [c.get("label", "") for c in q0.get("report", {}).get("ic", [])]
             logger.debug(
                 "Fundamentals %s: EPS label not matched. "
                 "eps_now=%s eps_ly=%s | q0 IC labels (first 15): %s",
@@ -255,6 +273,16 @@ def _parse_quarterly(reports: list, base: dict) -> None:
             base["gross_margin_current"] = gp_now / rev_now * 100
         if gp_ly is not None and rev_ly and rev_ly != 0:
             base["gross_margin_prior"] = gp_ly / rev_ly * 100
+
+        # --- EPS acceleration: compare current quarter's growth vs prior quarter's growth ---
+        # Requires q1 (one quarter back) and q5 (same quarter last year as q1).
+        if len(reports) >= 6:
+            q1 = reports[1]  # one quarter prior
+            q5 = reports[5]  # same quarter last year (vs q1)
+            eps_q1    = _find(q1, _EPS_LABELS)
+            eps_q5    = _find(q5, _EPS_LABELS)
+            if eps_q1 is not None and eps_q5 is not None and eps_q5 != 0:
+                base["eps_growth_prior_yoy"] = (eps_q1 - eps_q5) / abs(eps_q5) * 100
 
     except Exception as exc:
         logger.debug("Quarterly parse error for %s: %s", base.get("ticker"), exc)

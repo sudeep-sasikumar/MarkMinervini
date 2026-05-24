@@ -53,7 +53,11 @@ def detect_regime(
             breadth_pct = float(cached_breadth)
             logger.debug("Regime: using cached breadth %.1f%%", breadth_pct)
 
-    vix = fetch_vix() or 20.0
+    _raw_vix = fetch_vix()
+    if _raw_vix is None:
+        logger.warning("VIX fetch failed — defaulting to 20.0 (normal). "
+                       "Actual VIX may be elevated; verify manually.")
+    vix = _raw_vix or 20.0
     result = _assess_regime(spy_df, qqq_df, vix, breadth_pct)
 
     cache_set(cache_key, result, ttl_seconds=TTL_1H)
@@ -271,9 +275,10 @@ def _check_ftd(spy_df: pd.DataFrame) -> bool:
     correction_trough_date = close[correction_dates].idxmin()
     corr_idx = spy_df.index.get_loc(correction_trough_date)
 
-    # Look for FTD: day 4+ from trough with gain >= 1.7% on higher volume
+    # Look for FTD: day 4+ from trough with gain >= 1.7% on higher volume.
+    # FTD_MIN_DAY=4 means we need at least 3 prior days (0-indexed: start at index 3).
     sub = spy_df.iloc[corr_idx:]
-    for i in range(3, len(sub)):
+    for i in range(settings.FTD_MIN_DAY - 1, len(sub)):
         daily_gain = (sub["Close"].iloc[i] / sub["Close"].iloc[i - 1]) - 1
         vol_higher = sub["Volume"].iloc[i] > sub["Volume"].iloc[i - 1]
         if daily_gain >= settings.FTD_MIN_GAIN and vol_higher:

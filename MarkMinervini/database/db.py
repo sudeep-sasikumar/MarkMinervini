@@ -307,6 +307,32 @@ def mark_telegram_sent(signal_id: int) -> None:
         conn.execute("UPDATE signals SET telegram_sent=1 WHERE id=?", (signal_id,))
 
 
+def cleanup_stale_watchlist(max_age_days: int = 14) -> int:
+    """
+    Remove watchlist entries that have not been refreshed in max_age_days.
+    Returns the number of rows deleted.
+
+    A stock staying on the watchlist indefinitely is misleading — it implies an active
+    setup when the scanner may no longer be confirming it (VCP may have failed, or the
+    stock may have broken down).
+    """
+    with db_session() as conn:
+        result = conn.execute(
+            "DELETE FROM watchlist WHERE last_updated < date('now', ?)",
+            (f"-{max_age_days} days",),
+        )
+        deleted = result.rowcount
+    if deleted > 0:
+        logger.info("Watchlist cleanup: removed %d stale entries (age > %d days)", deleted, max_age_days)
+    return deleted
+
+
+def remove_watchlist_ticker(ticker: str) -> None:
+    """Remove a specific ticker from the watchlist (e.g., after an earnings miss)."""
+    with db_session() as conn:
+        conn.execute("DELETE FROM watchlist WHERE ticker=?", (ticker,))
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     init_db()

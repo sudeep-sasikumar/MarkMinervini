@@ -164,9 +164,9 @@ def detect_vcp(
     steps["base_days"] = base_days
     base_result["base_days"] = base_days
 
-    # Minimum base length: 60 trading days (settings.MIN_BASE_TRADING_DAYS).
-    # Previously used MIN_BASE_WEEKS * 5 = 15 days, which contradicted both the
-    # docstring ("60–120 trading days") and the settings constant.
+    # Minimum base length: 15 trading days (Minervini minimum = 3 weeks).
+    # The 60–120 day window in MAX_BASE_TRADING_DAYS is the SEARCH window,
+    # not the minimum base duration. These are different concepts.
     if base_days < settings.MIN_BASE_TRADING_DAYS:
         base_result["rejection_reason"] = (
             f"Step 3: Base only {base_days} days "
@@ -274,6 +274,14 @@ def detect_vcp(
     if rs_line_new_high:
         score += settings.RS_LINE_HIGH_BONUS
         steps["rs_line_new_high"] = True
+
+    # Pocket pivot bonus — reward stocks showing institutional demand during the base
+    pp_result = _check_pocket_pivot_bonus(ticker, df)
+    if pp_result:
+        score += settings.POCKET_PIVOT_BONUS
+        steps["pocket_pivot_bonus"] = True
+    else:
+        steps["pocket_pivot_bonus"] = False
 
     score = max(0, score)
     steps["score_before_gates"] = score
@@ -521,6 +529,32 @@ def _compute_atr(df: pd.DataFrame, period: int) -> float:
     )
     atr = float(np.mean(tr[-period:]))
     return atr
+
+
+def _check_pocket_pivot_bonus(ticker: str, df: pd.DataFrame) -> bool:
+    """
+    Return True if a pocket pivot occurred within the last 5 sessions.
+    A pocket pivot confirms institutional demand is accumulating during the base,
+    adding conviction to the VCP setup before the formal breakout.
+
+    Definition: today or one of the last 5 sessions closed UP on volume that
+    exceeds the highest DOWN-day volume in the prior 10 sessions.
+    """
+    if df is None or len(df) < 20:
+        return False
+    try:
+        from patterns.pocket_pivot import detect_pocket_pivot
+        # Check if a pocket pivot fired in any of the last 5 days
+        for lookback in range(5):
+            sub_df = df.iloc[:len(df) - lookback] if lookback > 0 else df
+            if len(sub_df) < 15:
+                continue
+            pp = detect_pocket_pivot(ticker, sub_df, trend_template_passes=True)
+            if pp.get("pocket_pivot"):
+                return True
+    except Exception as exc:
+        logger.debug("Pocket pivot bonus check failed for %s: %s", ticker, exc)
+    return False
 
 
 if __name__ == "__main__":

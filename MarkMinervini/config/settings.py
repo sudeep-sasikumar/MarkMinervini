@@ -33,7 +33,11 @@ VCP_SCORE_MIN = 80              # hard gate — 79 does NOT alert
 MIN_PRIOR_ADVANCE = 30          # % advance required before base started
 MIN_BASE_WEEKS = 3              # minimum base duration (15 trading days)
 MAX_BASE_TRADING_DAYS = 120     # look-back window for base detection
-MIN_BASE_TRADING_DAYS = 60
+# Minervini minimum base = 3 weeks = 15 trading days.
+# The master prompt states "Look back 60–120 trading days" for the SEARCH WINDOW,
+# not the minimum duration. 60 was incorrectly used as the minimum in Session 5.
+MIN_BASE_TRADING_DAYS = 15      # 3 weeks minimum (was wrongly 60)
+POCKET_PIVOT_BONUS = 5          # VCP score bonus if pocket pivot confirmed in last 5 days
 CONTRACTION_TIGHTENING_RATIO = 0.85  # each contraction must be < prev * 0.85
 MIN_CONTRACTIONS = 2
 PIVOT_ZONE_DAYS = 15            # last N days define the pivot zone
@@ -94,6 +98,17 @@ BREADTH_MIXED_LOW = BREADTH_WEAK  # alias kept for backwards compat
 EARNINGS_BLOCK_DAYS = 5         # block signal entirely
 EARNINGS_WARNING_DAYS = 14      # allow, but warn + 50% size
 EARNINGS_LOOKBACK_DAYS = 2      # post-earnings assessment window
+
+# ---------------------------------------------------------------------------
+# Watchlist management
+# ---------------------------------------------------------------------------
+WATCHLIST_MAX_AGE_DAYS = 14     # remove watchlist entries not refreshed in this many days
+NEAR_PIVOT_THRESHOLD = 0.05     # within 5% of pivot price = "near pivot"
+
+# ---------------------------------------------------------------------------
+# Fundamentals scoring
+# ---------------------------------------------------------------------------
+EPS_ACCELERATION_SCORE = 2      # bonus score when EPS growth is accelerating quarter-over-quarter
 
 # ---------------------------------------------------------------------------
 # Scheduler — UK/BST times (Section 12)
