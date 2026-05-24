@@ -65,8 +65,11 @@ def detect_pocket_pivot(
         if price_today <= price_prev:
             return result
 
-        # Find the highest DOWN-day volume in the prior 10 sessions (excluding today)
-        prior_10 = df.iloc[-11:-1]
+        # Find the highest DOWN-day volume in the prior 10 sessions (excluding today).
+        # Use 11 rows so that shift(1) has a valid predecessor for every row we evaluate;
+        # without this, the first row after shift produces NaN and that session is
+        # never classified as a down day, quietly reducing the window to 9 sessions.
+        prior_10 = df.iloc[-12:-1]
         down_days = prior_10[prior_10["Close"] < prior_10["Close"].shift(1)]
         if down_days.empty:
             # No down days — rare, but treat as bullish

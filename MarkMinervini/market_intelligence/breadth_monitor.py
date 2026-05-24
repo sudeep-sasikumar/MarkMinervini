@@ -31,7 +31,7 @@ def compute_breadth(price_data: Optional[dict[str, pd.DataFrame]] = None) -> flo
 
     if price_data is None:
         sp500 = get_sp500_tickers()
-        price_data = fetch_ohlcv_batch(sp500, period="1y")
+        price_data = fetch_ohlcv_batch(sp500, period="2y")
 
     above = 0
     total = 0

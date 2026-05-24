@@ -1,14 +1,26 @@
 """
-Relative Strength (RS) rank calculator — Minervini-style, NOT RSI.
+Relative Strength (RS) rank calculator — Minervini/IBD-style, NOT RSI.
 
-RS = percentile rank of 12-month price performance across the entire universe.
-rs_raw  = (adjusted_close_today / adjusted_close_252_days_ago) - 1
-rs_rating = (rank / total) * 100   (higher = stronger, 100 = universe leader)
+RS uses the IBD-weighted 12-month formula (NOT a simple 12-month return):
+    rs_raw = 0.40 × Q4_return + 0.20 × Q3_return + 0.20 × Q2_return + 0.20 × Q1_return
+
+Where each quarter covers ~63 trading days:
+    Q4 (most recent):  close[-1]   / close[-63]  - 1
+    Q3:                close[-63]  / close[-126] - 1
+    Q2:                close[-126] / close[-189] - 1
+    Q1 (oldest):       close[-189] / close[-252] - 1
+
+Weighting Q4 at 40% means stocks that surged recently rank higher than those
+whose gains are all in the distant past — exactly what Minervini looks for.
+A simple 12-month return is identical to Q1_through_Q4 equally weighted (25%
+each), which understates the importance of recent momentum.
+
+rs_rating = percentile rank in [0, 100] across the universe (100 = leader).
 
 RS Comparative Line = stock_close / SPY_close
 Flags "RS LINE NEW HIGH" when the RS line hits a 52-week high while price has not.
 
-Vectorised via pd.concat for the core 252-day return — no per-ticker loops.
+Vectorised via pd.concat — no per-ticker loops.
 Target: < 30 seconds for 1,500 tickers.
 """
 
@@ -29,6 +41,12 @@ def compute_rs_ratings(
     """
     Compute RS ratings for all tickers in price_data using vectorised operations.
 
+    Uses the IBD/Minervini weighted quarterly formula:
+        rs_raw = 0.40*Q4 + 0.20*Q3 + 0.20*Q2 + 0.20*Q1
+    where Q4 is the most recent quarter (highest weight = recent momentum matters most).
+
+    Requires at least 252 trading days of data per ticker.
+
     Args:
         price_data: {ticker: OHLCV DataFrame} from fetch_ohlcv_batch
 
@@ -43,13 +61,27 @@ def compute_rs_ratings(
 
     closes = pd.concat(eligible, axis=1)
 
-    # Vectorised: latest close and close 252 days ago — no loop
-    price_now = closes.iloc[-1]
-    price_252 = closes.iloc[-252]
+    # Quarterly boundary prices (vectorised — one row access each)
+    p0   = closes.iloc[-1]    # today
+    p63  = closes.iloc[-63]   # ~3 months ago
+    p126 = closes.iloc[-126]  # ~6 months ago
+    p189 = closes.iloc[-189]  # ~9 months ago
+    p252 = closes.iloc[-252]  # ~12 months ago
 
-    # Avoid division by zero
-    valid_mask = (price_252 > 0) & price_now.notna() & price_252.notna()
-    rs_raw = (price_now[valid_mask] / price_252[valid_mask]) - 1.0
+    # Require all five price points to be valid and > 0
+    valid_mask = (
+        p0.notna() & p63.notna() & p126.notna() & p189.notna() & p252.notna() &
+        (p63 > 0) & (p126 > 0) & (p189 > 0) & (p252 > 0)
+    )
+
+    # Quarterly returns
+    q4 = (p0[valid_mask]   / p63[valid_mask])  - 1.0   # most recent quarter
+    q3 = (p63[valid_mask]  / p126[valid_mask]) - 1.0
+    q2 = (p126[valid_mask] / p189[valid_mask]) - 1.0
+    q1 = (p189[valid_mask] / p252[valid_mask]) - 1.0   # oldest quarter
+
+    # IBD-weighted composite: Q4 gets double weight to reward recent momentum
+    rs_raw = 0.40 * q4 + 0.20 * q3 + 0.20 * q2 + 0.20 * q1
 
     if rs_raw.empty:
         return pd.DataFrame(columns=["ticker", "rs_raw", "rs_rating"])

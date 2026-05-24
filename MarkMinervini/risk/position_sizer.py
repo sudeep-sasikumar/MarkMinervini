@@ -72,15 +72,17 @@ def compute_position_size(
         }
     """
     fx_warning = False
+    fx_source = "provided"      # caller supplied the rate directly
     # Fetch live GBPUSD if not supplied.
     # Use fetch_gbpusd_with_source() so we can reliably detect whether the
-    # returned rate is live or a hardcoded fallback — fetch_gbpusd() swallows
-    # its own exception and returns 1.27 silently, so we would never know.
+    # returned rate is live, cached, or a hardcoded fallback — fetch_gbpusd()
+    # swallows its own exception and returns 1.27 silently, so we would never know.
     if gbpusd_rate is None:
         from data.fetcher import fetch_gbpusd_with_source
         fx = fetch_gbpusd_with_source()
         gbpusd_rate = fx["rate"]
-        if fx["source"] == "fallback":
+        fx_source = fx["source"]          # "live" | "cache" | "fallback"
+        if fx_source == "fallback":
             fx_warning = True
             logger.warning("GBPUSD fetch used fallback rate 1.27 — verify position size manually")
 
@@ -96,7 +98,7 @@ def compute_position_size(
         "risk_pct": 0.0,
         "stop_pct": 0.0,
         "gbpusd_rate": gbpusd_rate,
-        "fx_rate_source": "fallback" if fx_warning else "live",
+        "fx_rate_source": fx_source,
         "fx_warning": fx_warning,
         "valid": False,
         "note": "",
@@ -167,7 +169,7 @@ def compute_position_size(
         "risk_pct": round(actual_risk_pct, 2),
         "stop_pct": round(stop_pct, 2),
         "gbpusd_rate": gbpusd_rate,
-        "fx_rate_source": "fallback" if fx_warning else "live",
+        "fx_rate_source": fx_source,
         "fx_warning": fx_warning,
         "valid": True,
         "note": "; ".join(notes) if notes else "OK",
@@ -177,27 +179,49 @@ def compute_position_size(
 
 def get_portfolio_drawdown() -> float:
     """
-    Compute current portfolio drawdown from peak equity, based on trade journal.
+    Compute current portfolio drawdown from live unrealised P&L on open positions.
     Returns a fraction (0.0 = no drawdown, 0.30 = 30% drawdown).
+
+    BUG FIX: the previous version read `pnl_gbp` from the DB, but that column is
+    only set when a position is CLOSED.  For open positions it is always NULL,
+    so `r['pnl_gbp'] or 0.0` was always 0 and the circuit breaker NEVER fired.
+
+    Correct approach: fetch current prices, compute live unrealised P&L in USD,
+    convert to GBP using the cached GBPUSD rate, compare against account equity.
     """
     try:
         conn = get_connection()
         rows = conn.execute(
-            "SELECT entry_price, shares, pnl_gbp FROM positions WHERE status='open'"
+            "SELECT id, ticker, entry_price, shares FROM positions WHERE status='open'"
         ).fetchall()
         conn.close()
 
         if not rows:
             return 0.0
 
-        total_pnl = sum(r["pnl_gbp"] or 0.0 for r in rows)
         equity = settings.ACCOUNT_EQUITY_GBP
         if equity <= 0:
             return 0.0
 
-        if total_pnl >= 0:
+        from data.fetcher import fetch_latest_price, fetch_gbpusd
+        gbpusd = fetch_gbpusd()   # cached 1h — no extra network cost on repeated calls
+
+        total_pnl_gbp = 0.0
+        for row in rows:
+            try:
+                current_price = fetch_latest_price(row["ticker"])
+                if current_price is None:
+                    continue
+                entry  = row["entry_price"] or 0.0
+                shares = row["shares"] or 0
+                pnl_usd = (current_price - entry) * shares
+                total_pnl_gbp += pnl_usd / gbpusd if gbpusd else 0.0
+            except Exception as exc:
+                logger.debug("P&L calc failed for %s: %s", row["ticker"], exc)
+
+        if total_pnl_gbp >= 0:
             return 0.0
-        return min(abs(total_pnl) / equity, 1.0)
+        return min(abs(total_pnl_gbp) / equity, 1.0)
 
     except Exception as exc:
         logger.warning("Portfolio drawdown calculation failed: %s", exc)

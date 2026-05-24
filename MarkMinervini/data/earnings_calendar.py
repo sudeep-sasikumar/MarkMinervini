@@ -128,8 +128,7 @@ def assess_post_earnings(ticker: str) -> Optional[dict]:
     Check if a ticker reported earnings in the last 2 days.
     Returns assessment dict or None if no recent earnings found.
     """
-    events = get_earnings_calendar(days_ahead=0)
-    # Also look back 2 days
+    # Look back over the recent window defined by EARNINGS_LOOKBACK_DAYS
     today = date.today()
     lookback_start = today - timedelta(days=settings.EARNINGS_LOOKBACK_DAYS)
 

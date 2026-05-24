@@ -88,9 +88,26 @@ def update_open_position_stops() -> list[dict]:
                 # Suggest trailing stop if price has moved significantly in our favour
                 gain_pct = (current_price / entry - 1) * 100
                 if gain_pct >= initial_stop_pct:
-                    # Price has moved at least 1R in our favour — move to breakeven
+                    # Price has moved at least 1R in our favour — move to breakeven.
                     new_stop = compute_breakeven_stop(entry)
                     if new_stop > stop:
+                        # Persist the updated stop to the DB immediately so the
+                        # same suggestion doesn't fire again on every post-market run.
+                        try:
+                            with db_session() as conn:
+                                conn.execute(
+                                    "UPDATE positions SET stop_price=? WHERE id=?",
+                                    (new_stop, pos["id"]),
+                                )
+                            logger.info(
+                                "Stop updated for %s: %.2f → %.2f (breakeven)",
+                                pos["ticker"], stop, new_stop,
+                            )
+                        except Exception as db_exc:
+                            logger.warning(
+                                "Failed to persist breakeven stop for %s: %s",
+                                pos["ticker"], db_exc,
+                            )
                         alerts.append({
                             "ticker": pos["ticker"],
                             "action": "MOVE TO BREAKEVEN",
@@ -99,7 +116,7 @@ def update_open_position_stops() -> list[dict]:
                             "suggested_stop": new_stop,
                             "message": (
                                 f"📈 {pos['ticker']} +{gain_pct:.1f}% — "
-                                f"consider moving stop to breakeven ${new_stop:.2f}"
+                                f"stop moved to breakeven ${new_stop:.2f}"
                             ),
                         })
         except Exception as exc:
