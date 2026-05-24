@@ -188,23 +188,34 @@ def detect_vcp(
         base_result["steps"] = steps
         return base_result
 
-    valid_series = True
     for i in range(1, len(contractions)):
-        if contractions[i]["depth_pct"] >= contractions[i - 1]["depth_pct"]:
-            # Hard disqualifier: wider than previous = not a VCP
+        prev_depth = contractions[i - 1]["depth_pct"]
+        curr_depth = contractions[i]["depth_pct"]
+
+        # Hard fail 1: contraction is WIDER than the previous — not a VCP
+        if curr_depth >= prev_depth:
             base_result["rejection_reason"] = (
-                f"Step 5: Contraction {i+1} ({contractions[i]['depth_pct']:.1f}%) wider "
-                f"than contraction {i} ({contractions[i-1]['depth_pct']:.1f}%) — not a VCP"
+                f"Step 5: Contraction {i+1} ({curr_depth:.1f}%) wider than "
+                f"contraction {i} ({prev_depth:.1f}%) — widening, not a VCP"
             )
             base_result["steps"] = steps
             return base_result
-        if contractions[i]["depth_pct"] > contractions[i - 1]["depth_pct"] * settings.CONTRACTION_TIGHTENING_RATIO:
-            valid_series = False  # not tight enough, but not a hard disqualifier
+
+        # Hard fail 2: not tight enough — must shrink by at least (1 - RATIO)
+        # e.g. CONTRACTION_TIGHTENING_RATIO=0.85 → each must be < 85% of previous
+        required_max = prev_depth * settings.CONTRACTION_TIGHTENING_RATIO
+        if curr_depth > required_max:
+            base_result["rejection_reason"] = (
+                f"Step 5: Contraction {i+1} ({curr_depth:.1f}%) does not tighten enough "
+                f"— must be < {required_max:.1f}% (85% of {prev_depth:.1f}%)"
+            )
+            base_result["steps"] = steps
+            return base_result
 
     if len(contractions) >= 3:
         score += 25
     score += 10 if len(contractions) >= 4 else 0
-    steps["step5_valid"] = valid_series
+    steps["step5_valid"] = True
 
     # ------------------------------------------------------------------
     # Step 6 — Volume decline across contractions

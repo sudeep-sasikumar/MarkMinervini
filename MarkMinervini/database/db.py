@@ -57,19 +57,56 @@ CREATE TABLE IF NOT EXISTS positions (
 );
 
 CREATE TABLE IF NOT EXISTS watchlist (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker         TEXT UNIQUE NOT NULL,
-    company_name   TEXT,
-    sector         TEXT,
-    added_date     TEXT,
-    vcp_score      INTEGER,
-    pivot_price    REAL,
-    rs_rating      REAL,
-    eps_growth     REAL,
-    rev_growth     REAL,
-    earnings_date  TEXT,
-    ai_notes       TEXT,
-    last_updated   DATETIME
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker              TEXT UNIQUE NOT NULL,
+    company_name        TEXT,
+    sector              TEXT,
+    added_date          TEXT,
+    vcp_score           INTEGER,
+    grade               TEXT,
+    pivot_price         REAL,
+    entry_price         REAL,
+    stop_price          REAL,
+    stop_pct            REAL,
+    target_1            REAL,
+    target_2            REAL,
+    base_days           INTEGER,
+    rs_rating           REAL,
+    rs_line_new_high    INTEGER DEFAULT 0,
+    eps_growth          REAL,
+    rev_growth          REAL,
+    fundamentals_score  INTEGER,
+    earnings_date       TEXT,
+    ai_notes            TEXT,
+    breakout_confirmed  INTEGER DEFAULT 0,
+    last_updated        DATETIME
+);
+
+-- Setups table: richer snapshot of each VCP setup for dashboard and intraday alerting.
+-- Grows over time; watchlist is the "current active" view; setups is the full audit trail.
+CREATE TABLE IF NOT EXISTS setups (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker              TEXT NOT NULL,
+    date                TEXT NOT NULL,
+    vcp_score           INTEGER,
+    grade               TEXT,
+    pivot_price         REAL,
+    entry_price         REAL,
+    stop_price          REAL,
+    stop_pct            REAL,
+    target_1            REAL,
+    target_2            REAL,
+    rs_rating           REAL,
+    rs_line_new_high    INTEGER DEFAULT 0,
+    base_days           INTEGER,
+    contractions_json   TEXT,    -- JSON: [{depth_pct, vol_avg, start, end}]
+    vcp_steps_json      TEXT,    -- JSON: full steps dict from VCP detector
+    fundamentals_json   TEXT,    -- JSON: fundamentals result dict
+    trend_json          TEXT,    -- JSON: trend template result dict
+    sector              TEXT,
+    status              TEXT DEFAULT 'watchlist',  -- 'watchlist' | 'alerted' | 'intraday_alert'
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS system_log (
@@ -104,6 +141,8 @@ CREATE TABLE IF NOT EXISTS system_status (
 -- Indexes for frequent queries
 CREATE INDEX IF NOT EXISTS idx_signals_ticker_date ON signals(ticker, date);
 CREATE INDEX IF NOT EXISTS idx_watchlist_vcp ON watchlist(vcp_score DESC);
+CREATE INDEX IF NOT EXISTS idx_setups_ticker_date ON setups(ticker, date);
+CREATE INDEX IF NOT EXISTS idx_setups_status ON setups(status);
 CREATE INDEX IF NOT EXISTS idx_cache_key ON cache(key);
 CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
 """
@@ -156,10 +195,15 @@ def init_db() -> None:
 
 
 def upsert_watchlist(ticker: str, data: dict) -> None:
-    """Insert or update a watchlist entry."""
-    cols = ["ticker", "company_name", "sector", "added_date", "vcp_score",
-            "pivot_price", "rs_rating", "eps_growth", "rev_growth",
-            "earnings_date", "ai_notes", "last_updated"]
+    """Insert or update a watchlist entry (expanded schema)."""
+    cols = [
+        "ticker", "company_name", "sector", "added_date",
+        "vcp_score", "grade", "pivot_price", "entry_price", "stop_price",
+        "stop_pct", "target_1", "target_2", "base_days",
+        "rs_rating", "rs_line_new_high", "eps_growth", "rev_growth",
+        "fundamentals_score", "earnings_date", "ai_notes",
+        "breakout_confirmed", "last_updated",
+    ]
     placeholders = ", ".join("?" for _ in cols)
     updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "ticker")
     sql = f"""
@@ -169,6 +213,22 @@ def upsert_watchlist(ticker: str, data: dict) -> None:
     values = [data.get(c) for c in cols]
     with db_session() as conn:
         conn.execute(sql, values)
+
+
+def insert_setup(data: dict) -> int:
+    """Insert a new setup snapshot into the setups table. Returns the row id."""
+    cols = [
+        "ticker", "date", "vcp_score", "grade", "pivot_price", "entry_price",
+        "stop_price", "stop_pct", "target_1", "target_2", "rs_rating",
+        "rs_line_new_high", "base_days", "contractions_json", "vcp_steps_json",
+        "fundamentals_json", "trend_json", "sector", "status",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    sql = f"INSERT INTO setups ({', '.join(cols)}) VALUES ({placeholders})"
+    values = [data.get(c) for c in cols]
+    with db_session() as conn:
+        cursor = conn.execute(sql, values)
+        return cursor.lastrowid
 
 
 def insert_signal(data: dict) -> int:

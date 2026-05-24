@@ -42,17 +42,23 @@ def _check_ollama() -> bool:
         resp = requests.get(f"{settings.OLLAMA_URL}/api/tags", timeout=5)
         if resp.status_code != 200:
             raise ConnectionError(f"HTTP {resp.status_code}")
-        # Confirm the model is actually pulled
+        # Confirm the exact model is pulled (no prefix fuzzing — llama3.2:1b ≠ llama3.2:3b)
         tags = resp.json()
         models = [m.get("name", "") for m in tags.get("models", [])]
-        model_available = any(
-            settings.OLLAMA_MODEL in m or m.startswith(settings.OLLAMA_MODEL.split(":")[0])
-            for m in models
-        )
+        # Allow "llama3.2:3b" to match "llama3.2:3b" or "llama3.2:3b-instruct-q4" etc.,
+        # but NOT "llama3.2:1b".  We do this by checking that the tag part matches.
+        target = settings.OLLAMA_MODEL
+        target_base, _, target_tag = target.partition(":")
+        model_available = False
+        for m in models:
+            m_base, _, m_tag = m.partition(":")
+            if m_base == target_base and (not target_tag or m_tag == target_tag or m_tag.startswith(target_tag)):
+                model_available = True
+                break
         if not model_available:
             logger.warning(
                 "Ollama reachable but model '%s' not found (available: %s) — AI offline",
-                settings.OLLAMA_MODEL, models
+                target, models
             )
             _OLLAMA_AVAILABLE = False
         else:

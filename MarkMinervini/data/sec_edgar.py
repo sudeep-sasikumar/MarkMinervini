@@ -233,22 +233,7 @@ def get_latest_10k_mda(ticker: str, max_chars: int = 3000) -> Optional[str]:
         if not latest_10k:
             return None
 
-        # Fetch the filing index to find the primary document
         acc_clean = latest_10k.replace("-", "")
-        index_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{latest_10k}-index.htm"
-        resp2 = requests.get(index_url, headers={**_HEADERS, "Accept": "text/html"}, timeout=10)
-
-        # Parse accession to build document URL
-        doc_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/"
-
-        # Use EDGAR full-text viewer as reliable fallback
-        viewer_url = (
-            f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
-            f"&CIK={cik}&type=10-K&dateb=&owner=include&count=1"
-        )
-
-        # Best effort: fetch inline XBRL viewer document list
-        filing_url = f"{_EDGAR_BASE}/submissions/CIK{cik}.json"
         text = _fetch_filing_text(int(cik), acc_clean, latest_10k)
         if text:
             mda = _extract_mda_section(text, max_chars)
@@ -262,30 +247,49 @@ def get_latest_10k_mda(ticker: str, max_chars: int = 3000) -> Optional[str]:
 
 
 def _fetch_filing_text(cik_int: int, acc_clean: str, acc_dashed: str) -> Optional[str]:
-    """Attempt to fetch the primary HTML/text document from a 10-K filing."""
+    """
+    Attempt to fetch the primary HTML/text document from a 10-K filing.
+    Correctly resolves relative, root-relative, and absolute URLs using the
+    EDGAR archive base path for this accession number.
+    """
+    archive_base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/"
     try:
-        # Try the main filing document by fetching the index
-        index_url = (
-            f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/"
-            f"{acc_dashed}-index.htm"
-        )
+        index_url = f"{archive_base}{acc_dashed}-index.htm"
         resp = requests.get(index_url, headers={**_HEADERS, "Accept": "text/html"}, timeout=10)
-        # Extract links to .htm documents
+        resp.raise_for_status()
+
+        # Extract all .htm links from the index page
         links = re.findall(r'href="([^"]*\.htm)"', resp.text, re.IGNORECASE)
-        # Look for the main 10-K document (largest .htm file typically)
+
         for link in links:
-            if any(x in link.lower() for x in ["10k", "annual", "form10", "doc"]):
-                full_url = f"https://www.sec.gov{link}" if link.startswith("/") else link
+            # Skip table-of-contents or exhibit files
+            link_lower = link.lower()
+            if any(skip in link_lower for skip in ["exhibit", "ex-", "_ex", "toc"]):
+                continue
+            if any(x in link_lower for x in ["10k", "10-k", "annual", "form10", "doc", "filing"]):
+                # Build absolute URL correctly regardless of whether link is:
+                # - absolute:      https://www.sec.gov/...
+                # - root-relative: /Archives/edgar/...
+                # - relative:      aapl-20230930.htm
+                if link.startswith("http"):
+                    full_url = link
+                elif link.startswith("/"):
+                    full_url = f"https://www.sec.gov{link}"
+                else:
+                    full_url = archive_base + link
+
                 doc_resp = requests.get(
                     full_url, headers={**_HEADERS, "Accept": "text/html"}, timeout=15
                 )
-                # Strip HTML tags
+                doc_resp.raise_for_status()
+                # Strip HTML tags and normalise whitespace
                 text = re.sub(r"<[^>]+>", " ", doc_resp.text)
                 text = re.sub(r"\s+", " ", text).strip()
                 if len(text) > 1000:
                     return text
+
     except Exception as exc:
-        logger.debug("Filing text fetch failed: %s", exc)
+        logger.debug("Filing text fetch failed for CIK %d / %s: %s", cik_int, acc_dashed, exc)
     return None
 
 

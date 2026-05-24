@@ -71,6 +71,7 @@ def compute_position_size(
           "risk_dollars": float,        # = risk_gbp
         }
     """
+    fx_warning = False
     # Fetch live GBPUSD if not supplied
     if gbpusd_rate is None:
         try:
@@ -78,7 +79,10 @@ def compute_position_size(
             gbpusd_rate = fetch_gbpusd()
         except Exception:
             gbpusd_rate = 1.27  # safe fallback
+            fx_warning = True
+            logger.warning("GBPUSD fetch failed — using fallback rate 1.27; verify position size manually")
 
+    fx_live = gbpusd_rate is not None  # True if caller supplied a rate (vs internal fetch)
     result = {
         "shares": 0,
         "position_value_usd": 0.0,
@@ -87,10 +91,12 @@ def compute_position_size(
         "position_pct": 0.0,
         "risk_gbp": 0.0,
         "risk_usd": 0.0,
-        "risk_dollars": 0.0,          # legacy alias = risk_gbp
+        "risk_dollars": 0.0,          # alias = risk_usd (NOT risk_gbp — USD matches "dollars")
         "risk_pct": 0.0,
         "stop_pct": 0.0,
         "gbpusd_rate": gbpusd_rate,
+        "fx_rate_source": "live" if fx_live else "fetched",
+        "fx_warning": False,
         "valid": False,
         "note": "",
     }
@@ -145,18 +151,23 @@ def compute_position_size(
     actual_risk_gbp = actual_risk_usd / gbpusd_rate
     actual_risk_pct = actual_risk_gbp / account_equity * 100
 
+    if fx_warning:
+        notes.append(f"⚠️ FX rate fallback (1.27) — verify position size manually")
+
     result.update({
         "shares": shares,
         "position_value_usd": round(position_value_usd, 2),
         "position_value_gbp": round(position_value_gbp, 2),
-        "position_value": round(position_value_gbp, 2),      # legacy alias
+        "position_value": round(position_value_gbp, 2),      # legacy alias = GBP value
         "position_pct": round(position_pct, 2),
         "risk_gbp": round(actual_risk_gbp, 2),
         "risk_usd": round(actual_risk_usd, 2),
-        "risk_dollars": round(actual_risk_gbp, 2),           # legacy alias
+        "risk_dollars": round(actual_risk_usd, 2),           # alias = USD (matches "dollars")
         "risk_pct": round(actual_risk_pct, 2),
         "stop_pct": round(stop_pct, 2),
         "gbpusd_rate": gbpusd_rate,
+        "fx_rate_source": "fallback" if fx_warning else "live",
+        "fx_warning": fx_warning,
         "valid": True,
         "note": "; ".join(notes) if notes else "OK",
     })

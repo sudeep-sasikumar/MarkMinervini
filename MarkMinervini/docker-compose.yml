@@ -16,6 +16,7 @@ services:
       - ACCOUNT_EQUITY_GBP=${ACCOUNT_EQUITY_GBP:-50000}
       - RISK_PER_TRADE_PCT=${RISK_PER_TRADE_PCT:-0.015}
       - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
       - DB_PATH=/app/data/sepa.db
       - LOG_PATH=/app/logs/sepa.log
     depends_on:
@@ -37,9 +38,9 @@ services:
       - ollama_data:/root/.ollama
     command: serve
 
-  # One-shot init container: pulls the AI model so it's ready when sepa-system starts.
-  # Runs once, waits for Ollama to be ready, then exits with code 0.
-  # Docker Compose will not restart it (restart: no).
+  # One-shot init container: waits for Ollama server, pulls the AI model, then exits.
+  # Uses only the ollama CLI (no curl dependency) so works with the official image.
+  # sepa-system waits for this to complete successfully before starting.
   ollama-pull:
     image: ollama/ollama
     container_name: ollama_pull
@@ -48,14 +49,18 @@ services:
       - ollama
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
     entrypoint: /bin/sh
     command: >
       -c "
-        echo 'Waiting for Ollama to be ready...';
-        until curl -sf http://ollama:11434/api/tags > /dev/null; do sleep 2; done;
-        echo 'Pulling llama3.2:3b...';
-        ollama pull llama3.2:3b;
-        echo 'Model ready.';
+        echo 'Waiting for Ollama server...';
+        until ollama list > /dev/null 2>&1; do
+          echo 'Ollama not ready yet — retrying in 3s...';
+          sleep 3;
+        done;
+        echo 'Ollama ready. Pulling model: '\"$OLLAMA_MODEL\";
+        ollama pull \"${OLLAMA_MODEL:-llama3.2:3b}\";
+        echo 'Model pull complete.';
       "
 
 volumes:

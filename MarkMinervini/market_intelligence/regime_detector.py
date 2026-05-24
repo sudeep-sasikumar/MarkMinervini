@@ -117,13 +117,30 @@ def _assess_regime(
 
     # ---- Market breadth ----
     if breadth_pct is not None:
-        if breadth_pct < 20:
+        if breadth_pct < settings.BREADTH_BEAR:
             signals_allowed = False
             aggression = 0.0
             issues.append(f"Breadth {breadth_pct:.1f}% — bear territory")
-        elif breadth_pct < settings.BREADTH_MIXED_LOW:
+        elif breadth_pct < settings.BREADTH_WEAK:
             aggression = min(aggression, 0.75)
-            issues.append(f"Breadth {breadth_pct:.1f}% — mixed")
+            issues.append(f"Breadth {breadth_pct:.1f}% — mixed/weak")
+
+    # ---- High-impact economic event gate ----
+    # Per master prompt: reduce position sizes to 50% if high-impact event
+    # (Fed, CPI, NFP, PCE, GDP) is due within next 2 trading days.
+    try:
+        from data.economic_calendar import is_high_impact_window, get_high_impact_events
+        high_impact_event = is_high_impact_window()
+        if high_impact_event:
+            event_names = [e["event"] for e in get_high_impact_events(days_ahead=2)]
+            aggression = min(aggression, 0.5)
+            issues.append(
+                f"High-impact macro event imminent: {', '.join(event_names[:2])}"
+                f" — sizing reduced to 50%"
+            )
+    except Exception as _eco_exc:
+        logger.debug("Economic calendar check failed: %s", _eco_exc)
+        high_impact_event = False
 
     # ---- Derive final regime label ----
     if not bear_gate:

@@ -153,23 +153,62 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                                  rs_line_new_high=rs_line_nh)
                 vcp = enrich_vcp_result(vcp)
 
-                # Add to watchlist if score >= 70 (moderate VCP)
+                # Add to watchlist/setups if score >= 70 (moderate VCP — setup forming)
                 if vcp["vcp_score"] >= 70:
                     scan_funnel["vcp"] += 1
                     sector_info = _get_ticker_sector(ticker)
+                    import json as _json
                     upsert_watchlist(ticker, {
                         "ticker": ticker,
                         "company_name": sector_info.get("name", ticker),
                         "sector": sector_info.get("sector", "Unknown"),
                         "added_date": today,
                         "vcp_score": vcp["vcp_score"],
+                        "grade": vcp.get("grade"),
                         "pivot_price": vcp.get("pivot_price"),
+                        "entry_price": vcp.get("entry_price"),
+                        "stop_price": vcp.get("stop_price"),
+                        "stop_pct": vcp.get("stop_pct"),
+                        "target_1": vcp.get("target_1"),
+                        "target_2": vcp.get("target_2"),
+                        "base_days": vcp.get("base_days"),
                         "rs_rating": rs,
+                        "rs_line_new_high": 1 if rs_line_nh else 0,
                         "eps_growth": fund.get("eps_growth_yoy"),
                         "rev_growth": fund.get("rev_growth_yoy"),
+                        "fundamentals_score": fund.get("fundamentals_score"),
                         "earnings_date": None,
                         "ai_notes": None,
+                        "breakout_confirmed": 1 if vcp.get("breakout_confirmed") else 0,
                         "last_updated": today,
+                    })
+                    # Also persist a full setup snapshot for audit trail and intraday engine
+                    from database.db import insert_setup
+                    insert_setup({
+                        "ticker": ticker,
+                        "date": today,
+                        "vcp_score": vcp["vcp_score"],
+                        "grade": vcp.get("grade"),
+                        "pivot_price": vcp.get("pivot_price"),
+                        "entry_price": vcp.get("entry_price"),
+                        "stop_price": vcp.get("stop_price"),
+                        "stop_pct": vcp.get("stop_pct"),
+                        "target_1": vcp.get("target_1"),
+                        "target_2": vcp.get("target_2"),
+                        "rs_rating": rs,
+                        "rs_line_new_high": 1 if rs_line_nh else 0,
+                        "base_days": vcp.get("base_days"),
+                        "contractions_json": _json.dumps(vcp.get("contractions", [])),
+                        "vcp_steps_json": _json.dumps(vcp.get("steps", {})),
+                        "fundamentals_json": _json.dumps({
+                            "eps_growth_yoy": fund.get("eps_growth_yoy"),
+                            "rev_growth_yoy": fund.get("rev_growth_yoy"),
+                            "gross_margin_current": fund.get("gross_margin_current"),
+                            "fundamentals_score": fund.get("fundamentals_score"),
+                        }),
+                        "trend_json": _json.dumps(tt.get("details", {})),
+                        "sector": sector_info.get("sector", "Unknown"),
+                        "status": "watchlist",
                     })
 
                 # Only alert on score >= 80
@@ -309,7 +348,9 @@ def run_intraday_check():
 
         conn = get_connection()
         watchlist = conn.execute(
-            "SELECT ticker, pivot_price FROM watchlist WHERE vcp_score >= 70"
+            "SELECT ticker, pivot_price, entry_price, stop_price, stop_pct, "
+            "target_1, target_2, vcp_score, rs_rating, eps_growth, rev_growth, sector "
+            "FROM watchlist WHERE vcp_score >= 70"
         ).fetchall()
         conn.close()
 
@@ -359,7 +400,7 @@ def run_intraday_check():
                         "INTRADAY BREAKOUT: %s @ $%.2f (pivot=$%.2f, vol pace=%.1fx avg)",
                         ticker, current_price, pivot, volume_pace_ratio
                     )
-                    # Check not already alerted today
+                    # Deduplicate: block if already alerted today
                     conn2 = get_connection()
                     already_alerted = conn2.execute(
                         "SELECT id FROM signals WHERE ticker=? AND date=? AND telegram_sent=1",
@@ -367,14 +408,146 @@ def run_intraday_check():
                     ).fetchone()
                     conn2.close()
                     if not already_alerted:
-                        run_full_scan()  # full scan handles alert formatting and DB save
-                        break  # one re-scan per intraday window to avoid cascades
+                        _send_intraday_breakout_alert(
+                            ticker, row, current_price, volume_pace_ratio, avg_vol_50, today
+                        )
+                        break  # one alert per intraday window
 
             except Exception as exc:
                 logger.debug("Intraday check error for %s: %s", ticker, exc)
 
     except Exception as exc:
         logger.error("Intraday check failed: %s", exc, exc_info=True)
+
+
+def _send_intraday_breakout_alert(
+    ticker: str,
+    watchlist_row,
+    current_price: float,
+    volume_pace_ratio: float,
+    avg_vol_50: float,
+    today: str,
+) -> None:
+    """
+    Send an intraday breakout alert using stored watchlist/setup data.
+
+    Unlike the daily scan, this does NOT re-fetch daily bars or re-run the full
+    VCP algorithm. It uses the already-stored VCP setup values (pivot, stop, entry,
+    targets, score) and only substitutes the live intraday price and volume pace.
+
+    Final gates still enforced: regime, sector, earnings, position sizing.
+    """
+    from market_intelligence.regime_detector import detect_regime
+    from market_intelligence.sector_analyzer import get_sector_stage2_status, normalise_sector
+    from data.earnings_calendar import earnings_safety_status
+    from risk.position_sizer import compute_position_size, get_portfolio_drawdown, get_aggression_from_drawdown
+    from database.db import insert_signal, mark_telegram_sent
+    from alerts.telegram_bot import send_message
+
+    try:
+        regime = detect_regime()
+        if not regime["signals_allowed"]:
+            logger.info("Intraday alert suppressed for %s: regime=%s", ticker, regime["regime"])
+            return
+
+        sector = watchlist_row["sector"] or "Unknown"
+        canonical_sector = normalise_sector(sector)
+        if not get_sector_stage2_status(canonical_sector):
+            logger.info("Intraday alert suppressed for %s: sector %s not Stage 2", ticker, sector)
+            return
+
+        earn_status = earnings_safety_status(ticker)
+        if earn_status["action"] == "block":
+            logger.info("Intraday alert blocked for %s: %s", ticker, earn_status["message"])
+            return
+
+        drawdown = get_portfolio_drawdown()
+        dd_aggression, dd_warning = get_aggression_from_drawdown(drawdown)
+        final_aggression = min(regime["aggression_factor"], dd_aggression)
+
+        if final_aggression == 0.0:
+            logger.info("Intraday alert suppressed for %s: aggression=0 (drawdown circuit)", ticker)
+            return
+
+        # Use stored setup values; live entry is current_price (already above pivot)
+        pivot = watchlist_row["pivot_price"] or current_price
+        stop_price = watchlist_row["stop_price"]
+        entry_price = current_price  # use live intraday price as entry
+
+        if not stop_price or entry_price <= stop_price:
+            logger.info("Intraday alert invalid for %s: stop=%s entry=%s", ticker, stop_price, entry_price)
+            return
+
+        position = compute_position_size(
+            entry_price=entry_price,
+            stop_price=stop_price,
+            account_equity=settings.ACCOUNT_EQUITY_GBP,
+            aggression_factor=final_aggression,
+            earnings_size_factor=earn_status["size_factor"],
+        )
+        if not position["valid"]:
+            logger.info("Intraday sizing invalid for %s: %s", ticker, position["note"])
+            return
+
+        vcp_score = watchlist_row["vcp_score"] or 0
+        stop_pct = watchlist_row["stop_pct"] or 0
+        target_1 = entry_price * (1 + stop_pct / 100 * 2) if stop_pct else None
+        target_2 = entry_price * (1 + stop_pct / 100 * 3) if stop_pct else None
+
+        fx_warn = " ⚠️ FX fallback rate used — verify size" if position.get("fx_warning") else ""
+        intraday_msg = (
+            f"🚨 INTRADAY BREAKOUT ALERT — {ticker}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Price:    ${current_price:.2f}  (pivot ${pivot:.2f})\n"
+            f"Volume:   {volume_pace_ratio:.1f}× average (projected full-day)\n"
+            f"VCP Score: {vcp_score}\n\n"
+            f"ENTRY:    ${entry_price:.2f}\n"
+            f"STOP:     ${stop_price:.2f}  (-{stop_pct:.1f}%)\n"
+            f"T1 (2R):  ${target_1:.2f}\n" if target_1 else ""
+            f"T2 (3R):  ${target_2:.2f}\n" if target_2 else ""
+            f"\nSIZE ({settings.RISK_PER_TRADE_PCT*100:.1f}% risk, "
+            f"£{settings.ACCOUNT_EQUITY_GBP:,.0f}):\n"
+            f"  Shares: {position['shares']:,}\n"
+            f"  Position: ${position['position_value_usd']:,.0f} USD "
+            f"/ £{position['position_value_gbp']:,.0f} GBP "
+            f"({position['position_pct']:.1f}%)\n"
+            f"  Max loss: £{position['risk_gbp']:,.0f}{fx_warn}\n\n"
+            f"⚠️ Execute MANUALLY in Trading 212 ISA\n"
+            f"Signal: INTRADAY_BREAKOUT | Regime: {regime['regime']}"
+        )
+        if earn_status["action"] == "warn":
+            intraday_msg += f"\n⚠️ {earn_status['message']}"
+        if regime.get("high_impact_event_imminent"):
+            intraday_msg += f"\n⚠️ High-impact macro event imminent — reduced size applied"
+
+        signal_id = insert_signal({
+            "ticker": ticker,
+            "date": today,
+            "signal_type": "INTRADAY_BREAKOUT",
+            "vcp_score": vcp_score,
+            "pivot_price": pivot,
+            "entry_price": entry_price,
+            "stop_price": stop_price,
+            "stop_pct": stop_pct,
+            "target_1": target_1,
+            "target_2": target_2,
+            "rs_rating": watchlist_row["rs_rating"],
+            "eps_growth": watchlist_row["eps_growth"],
+            "rev_growth": watchlist_row["rev_growth"],
+            "sector": sector,
+            "regime": regime["regime"],
+            "aggression_factor": final_aggression,
+            "ai_catalyst": "",
+            "ai_earnings_quality": "",
+            "ai_sentiment": "N/A",
+        })
+
+        if send_message(intraday_msg):
+            mark_telegram_sent(signal_id)
+            logger.info("INTRADAY BREAKOUT ALERT SENT: %s @ $%.2f", ticker, current_price)
+
+    except Exception as exc:
+        logger.error("Intraday alert failed for %s: %s", ticker, exc, exc_info=True)
 
 
 def _get_ticker_sector(ticker: str) -> dict:
