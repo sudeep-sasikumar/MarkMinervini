@@ -52,17 +52,50 @@ def run_backtest() -> dict:
 
         sp500 = get_sp500_tickers()
         logger.info("Fetching price data for %d S&P 500 tickers (this takes a while)...", len(sp500))
+
+        # Use "max" to ensure we have data covering the full backtest period
+        # (BACKTEST_START is 2015; we need data from ~2013 for the 18-month
+        # training window + 252-day RS lookback).
         price_data = fetch_ohlcv_batch(sp500, period="max")
+        logger.info("Fetched %d tickers with sufficient history", len(price_data))
 
         spy_df = fetch_ohlcv("SPY", period="max")
         if spy_df is None:
             raise ValueError("Could not fetch SPY data")
+
+        # --- Defensive timezone normalisation (second layer after fetch_ohlcv_batch) ---
+        # yfinance bulk download occasionally returns tz-aware UTC DatetimeIndex even
+        # after the per-ticker extraction fix.  Slicing a tz-aware DataFrame with a
+        # tz-naive Timestamp raises TypeError, which silently crashes the backtest.
+        # This loop guarantees all indexes are tz-naive before any .loc[] calls.
+        tz_fixed = 0
+        for ticker in list(price_data.keys()):
+            df = price_data[ticker]
+            if getattr(df.index, "tz", None) is not None:
+                price_data[ticker] = df.copy()
+                price_data[ticker].index = df.index.tz_localize(None)
+                tz_fixed += 1
+        if tz_fixed:
+            logger.warning(
+                "Stripped timezone from %d ticker DataFrames (yfinance returned tz-aware index)",
+                tz_fixed,
+            )
+
+        if getattr(spy_df.index, "tz", None) is not None:
+            spy_df = spy_df.copy()
+            spy_df.index = spy_df.index.tz_localize(None)
+            logger.warning("Stripped timezone from SPY DataFrame")
 
         # Filter to backtest period
         start = pd.Timestamp(settings.BACKTEST_START)
         end = pd.Timestamp(settings.BACKTEST_END)
 
         spy_period = spy_df.loc[start:end]
+        if len(spy_period) == 0:
+            raise ValueError(
+                f"SPY has no data in backtest range {settings.BACKTEST_START}→{settings.BACKTEST_END}. "
+                f"SPY data spans {spy_df.index[0].date()} → {spy_df.index[-1].date()}"
+            )
 
         # --- Walk-forward validation ---
         train_months = settings.BACKTEST_TRAIN_MONTHS
@@ -133,8 +166,13 @@ def run_backtest() -> dict:
         return {"metrics": metrics, "equity_curve": equity_records}
 
     except Exception as exc:
+        import traceback as _tb
+        tb_str = _tb.format_exc()
         logger.error("Backtest failed: %s", exc, exc_info=True)
-        return {"error": str(exc)}
+        # Print to stdout so the dashboard subprocess captures it separately from
+        # the logging stream — dashboard shows result.stderr; traceback goes here.
+        print(f"\n=== BACKTEST EXCEPTION ===\n{tb_str}\n=== END ===", flush=True)
+        return {"error": str(exc), "traceback": tb_str}
 
 
 def _run_single_window(

@@ -810,19 +810,39 @@ elif page == "⚙️ System Status":
 
     st.divider()
 
-    # Log viewer
-    st.subheader("Recent Logs (last 50 lines)")
-    logs_df = _get_system_logs(50)
+    # Log viewer — DB-backed (fast) with raw file fallback
+    st.subheader("Recent Logs")
+    n_lines = st.slider("Lines to show", min_value=50, max_value=500, value=100, step=50)
+    logs_df = _get_system_logs(n_lines)
     if not logs_df.empty:
         st.dataframe(logs_df, use_container_width=True, hide_index=True, height=400)
     else:
-        # Fallback: show file log tail
+        # Fallback: read the raw log file (always available in container)
+        log_file = settings.LOG_PATH if hasattr(settings, "LOG_PATH") else "/app/logs/sepa.log"
+        if not os.path.exists(log_file):
+            log_file = "logs/sepa.log"
         try:
-            with open(LOG_PATH if os.path.exists(LOG_PATH) else "logs/sepa.log") as f:
+            with open(log_file) as f:
                 lines = f.readlines()
-            st.code("".join(lines[-50:]))
-        except Exception:
-            st.info("No logs available yet.")
+            st.code("".join(lines[-n_lines:]), language=None)
+        except FileNotFoundError:
+            st.info("Log file not found — no logs written yet.")
+        except Exception as exc:
+            st.warning(f"Could not read log file: {exc}")
+
+    # Raw log file download — useful for sending to Claude for debugging
+    log_file = settings.LOG_PATH if hasattr(settings, "LOG_PATH") else "/app/logs/sepa.log"
+    if not os.path.exists(log_file):
+        log_file = "logs/sepa.log"
+    if os.path.exists(log_file):
+        with open(log_file, "rb") as f:
+            log_bytes = f.read()
+        st.download_button(
+            label="⬇️ Download full log file (for debugging)",
+            data=log_bytes,
+            file_name="sepa.log",
+            mime="text/plain",
+        )
 
     if st.button("🔄 Refresh"):
         st.rerun()
@@ -841,20 +861,38 @@ elif page == "📊 Backtest Results":
     )
 
     if st.button("▶️ Run Backtest (may take several minutes)"):
-        with st.spinner("Running backtest..."):
+        with st.spinner("Running backtest... (may take 5–15 min depending on data availability)"):
             try:
                 result = subprocess.run(
                     [sys.executable, "-m", "backtesting.backtest"],
                     capture_output=True, text=True, timeout=600,
+                    cwd=os.path.dirname(__file__),
                 )
                 if result.returncode == 0:
-                    st.success("Backtest complete!")
+                    st.success("Backtest complete! Scroll down for results.")
                 else:
-                    st.error(f"Backtest failed:\n{result.stderr[:500]}")
+                    st.error("Backtest failed — see diagnostic output below.")
+                    # Show the stdout first (contains explicit traceback from backtest.py)
+                    # then the LAST part of stderr (INFO lines are at the top; ERROR is at the bottom).
+                    stdout_out = (result.stdout or "").strip()
+                    stderr_out = (result.stderr or "").strip()
+                    # Show last 6 000 chars of stderr so the ERROR line is always visible
+                    stderr_tail = stderr_out[-6000:] if len(stderr_out) > 6000 else stderr_out
+
+                    with st.expander("🔍 Diagnostic output (full error + traceback)", expanded=True):
+                        if stdout_out:
+                            st.subheader("stdout (exception traceback)")
+                            st.code(stdout_out, language="python")
+                        if stderr_tail:
+                            st.subheader("stderr log (last ~6 000 chars — error at bottom)")
+                            st.code(stderr_tail, language=None)
+                        if not stdout_out and not stderr_tail:
+                            st.warning("No output captured — process may have been killed by OOM.")
             except subprocess.TimeoutExpired:
-                st.error("Backtest timed out (>10 min)")
+                st.error("Backtest timed out (>10 min) — process killed.")
+                st.info("Try reducing BACKTEST_END in settings.py or check VPS memory (docker stats).")
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Error launching backtest subprocess: {e}")
 
     # Load stored results
     conn = get_connection()
