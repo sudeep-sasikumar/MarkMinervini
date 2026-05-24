@@ -647,6 +647,24 @@ def main():
     # Initialise database
     init_db()
 
+    # Clear stale caches on startup so a Docker redeploy always gets fresh data.
+    # The SQLite database is on a persistent volume and survives container restarts,
+    # meaning old cached values (regime, sector stage2, breadth) from before a code
+    # fix can persist for hours.  Wiping them here forces fresh computation on the
+    # first scan after every deployment.
+    try:
+        from data.cache import delete as _cache_delete
+        _stale_keys = (
+            "regime:latest", "sector:performance",
+            "breadth:sp500_above_200sma", "vix:latest",
+            "ohlcv:SPY:2y", "ohlcv:QQQ:2y",
+        )
+        for _k in _stale_keys:
+            _cache_delete(_k)
+        logger.info("Startup: cleared %d stale cache keys", len(_stale_keys))
+    except Exception as _exc:
+        logger.warning("Startup cache clear failed (non-fatal): %s", _exc)
+
     # Send startup confirmation
     from alerts.telegram_bot import send_startup_message, is_telegram_available
     tg_ok = is_telegram_available()

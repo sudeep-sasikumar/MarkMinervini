@@ -55,7 +55,20 @@ def _get_regime():
     except Exception:
         return {"regime": "UNKNOWN", "vix_level": 0, "breadth_pct": None,
                 "distribution_days": 0, "aggression_factor": 1.0,
-                "signals_allowed": True, "regime_summary": "Data unavailable"}
+                "signals_allowed": True, "regime_summary": "Data unavailable",
+                "spy_close": None, "spy_sma200": None, "spy_above_sma200": None}
+
+
+def _force_refresh_caches():
+    """Delete all regime/market caches so the next fetch recomputes from live data."""
+    try:
+        from data.cache import delete as cache_delete
+        for key in ("regime:latest", "sector:performance",
+                    "breadth:sp500_above_200sma", "vix:latest",
+                    "ohlcv:SPY:2y", "ohlcv:QQQ:2y"):
+            cache_delete(key)
+    except Exception:
+        pass
 
 
 def _get_watchlist_df() -> pd.DataFrame:
@@ -115,6 +128,9 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.markdown("---")
+if st.sidebar.button("🔄 Force Regime Refresh", help="Clears cached regime, sector, and breadth data and recomputes from live market data."):
+    _force_refresh_caches()
+    st.rerun()
 st.sidebar.caption(f"SEPA v3.0 | {date.today().isoformat()}")
 st.sidebar.caption(f"Dashboard port: {settings.DASHBOARD_PORT}")
 
@@ -125,92 +141,408 @@ st.sidebar.caption(f"Dashboard port: {settings.DASHBOARD_PORT}")
 if page == "🏠 Live Dashboard":
     st.title("📈 Minervini SEPA — Live Dashboard")
 
-    # Auto-refresh every 60 seconds
-    refresh_placeholder = st.empty()
-    with refresh_placeholder.container():
-        st.caption(f"Auto-refreshing every {settings.DASHBOARD_REFRESH_SECONDS}s | "
-                   f"Last update: {datetime.now().strftime('%H:%M:%S')}")
+    # Auto-refresh header
+    st.caption(
+        f"Auto-refreshing every {settings.DASHBOARD_REFRESH_SECONDS}s | "
+        f"Last update: {datetime.now().strftime('%H:%M:%S')} | "
+        f"Use **🔄 Force Regime Refresh** in sidebar to clear stale cache"
+    )
 
-    # --- Top metric cards ---
-    regime_data = _get_regime()
+    # ---------------------------------------------------------------------------
+    # Data loading
+    # ---------------------------------------------------------------------------
+    regime_data  = _get_regime()
     regime_label = regime_data.get("regime", "UNKNOWN")
-    vix = regime_data.get("vix_level", 0.0) or 0.0
-    breadth = regime_data.get("breadth_pct")
+    aggression   = regime_data.get("aggression_factor", 1.0)
+    vix          = float(regime_data.get("vix_level", 0.0) or 0.0)
+    breadth      = regime_data.get("breadth_pct")
+    dist_days    = regime_data.get("distribution_days", 0)
+    spy_close    = regime_data.get("spy_close")
+    spy_sma50    = regime_data.get("spy_sma50")
+    spy_sma150   = regime_data.get("spy_sma150")
+    spy_sma200   = regime_data.get("spy_sma200")
+    spy_above    = regime_data.get("spy_above_sma200")
+    spy_stack_ok = regime_data.get("spy_ma_stack_ok")
+    spy_date     = regime_data.get("spy_last_date", "")
+    bear_gate    = regime_data.get("bear_gate", False)
+    ftd          = regime_data.get("ftd_confirmed", False)
+    hi_impact    = regime_data.get("high_impact_event_imminent", False)
 
-    signals_df = _get_signals_df(50)
-    today_signals = len(signals_df[signals_df["date"] == date.today().isoformat()]) if not signals_df.empty else 0
-    watchlist_df = _get_watchlist_df()
+    signals_df   = _get_signals_df(50)
+    today_str    = date.today().isoformat()
+    today_count  = (
+        len(signals_df[signals_df["date"] == today_str])
+        if not signals_df.empty else 0
+    )
+    watchlist_df  = _get_watchlist_df()
     watchlist_size = len(watchlist_df)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Market Regime", f"{_regime_colour(regime_label)} {regime_label}")
-    col2.metric("Signals Today", today_signals)
-    col3.metric("Watchlist", watchlist_size)
-    col4.metric("VIX", f"{vix:.1f}" if vix else "N/A")
+    # ---------------------------------------------------------------------------
+    # Top metric cards (5 columns)
+    # ---------------------------------------------------------------------------
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+
+    _regime_icon = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "🟡"}.get(regime_label, "⚪")
+    mc1.metric(
+        "Market Regime",
+        f"{_regime_icon} {regime_label}",
+        f"{aggression:.0%} aggression",
+    )
+
+    _vix_delta = (
+        "Calm ✅" if vix < 15 else
+        "Normal ✅" if vix < 25 else
+        "Caution ⚠️" if vix < 35 else
+        "EXTREME 🔴"
+    )
+    mc2.metric("VIX", f"{vix:.1f}", _vix_delta)
+
+    _dd_delta = (
+        "🔴 DANGER — suppressed" if dist_days >= settings.DISTRIBUTION_DAYS_DANGER else
+        "🟡 Caution — 50% sizing" if dist_days >= settings.DISTRIBUTION_DAYS_CAUTION else
+        "🟢 Clear"
+    )
+    mc3.metric(
+        "Distribution Days",
+        f"{dist_days} / {settings.DISTRIBUTION_DAYS_DANGER}",
+        _dd_delta,
+    )
+
+    _breadth_str = f"{breadth:.0f}%" if breadth is not None else "N/A"
+    _breadth_delta = (
+        "Healthy 🟢" if (breadth or 0) >= 60 else
+        "Mixed 🟡" if (breadth or 0) >= 40 else
+        "Weak 🟠" if (breadth or 0) >= 20 else
+        "Bear 🔴"
+    ) if breadth is not None else ""
+    mc4.metric("Breadth (>200-SMA)", _breadth_str, _breadth_delta)
+
+    mc5.metric("Signals Today", today_count, f"{watchlist_size} on watchlist")
 
     st.divider()
 
-    left, right = st.columns([3, 2])
+    # ---------------------------------------------------------------------------
+    # Main layout: left (regime detail) | right (sectors + signals)
+    # ---------------------------------------------------------------------------
+    left_col, right_col = st.columns([3, 2])
 
-    # --- Left: Active Buy Signals ---
-    with left:
-        st.subheader("🚀 Active Buy Signals (Today)")
-        today_str = date.today().isoformat()
+    # ===================================================================
+    # LEFT — Full regime diagnostic panel
+    # ===================================================================
+    with left_col:
 
-        if not signals_df.empty:
-            today_df = signals_df[signals_df["date"] == today_str].copy()
+        # --- Regime banner ---
+        _summary = regime_data.get("regime_summary", "")
+        if regime_label == "BULL":
+            st.success(f"✅ **BULL MARKET** — Full signals active | {_summary}")
+        elif regime_label == "BEAR":
+            st.error(f"🔴 **BEAR MARKET MODE** — New buy signals suppressed | {_summary}")
         else:
-            today_df = pd.DataFrame()
+            st.warning(f"🟡 **NEUTRAL** — Reduced position sizing | {_summary}")
 
-        if today_df.empty:
-            st.info("No signals generated today yet.")
+        st.subheader("🔍 SPY / Index Health")
+
+        # SPY vs SMA200
+        spy_c1, spy_c2 = st.columns(2)
+        with spy_c1:
+            if spy_close and spy_sma200:
+                pct_vs_200 = (spy_close / spy_sma200 - 1) * 100
+                _spy_icon = "✅" if spy_above else "🔴"
+                st.metric(
+                    f"{_spy_icon} SPY vs 200-day SMA",
+                    f"${spy_close:,.2f}",
+                    f"{pct_vs_200:+.2f}% | SMA200 = ${spy_sma200:,.2f}",
+                )
+                if spy_date:
+                    st.caption(f"Last data: {spy_date}")
+            else:
+                st.metric("SPY vs 200-day SMA", "Loading…")
+
+        with spy_c2:
+            if spy_sma50 and spy_sma150 and spy_sma200:
+                _stack_icon = "✅" if spy_stack_ok else "⚠️"
+                st.metric(
+                    f"{_stack_icon} MA Stack  50 > 150 > 200",
+                    "Aligned ✅" if spy_stack_ok else "Broken ⚠️",
+                    f"50=${spy_sma50:,.0f}  150=${spy_sma150:,.0f}  200=${spy_sma200:,.0f}",
+                )
+            else:
+                st.metric("MA Stack", "Loading…")
+
+        # 52-week high proximity (fetch from cache if available)
+        try:
+            from data.fetcher import fetch_ohlcv as _fetch_spy
+            _spy_df = _fetch_spy("SPY", "2y")
+            if _spy_df is not None and len(_spy_df) >= 20:
+                _52wk_hi = float(_spy_df["Close"].rolling(252).max().iloc[-1])
+                _52wk_lo = float(_spy_df["Close"].rolling(252).min().iloc[-1])
+                _spy_cur = float(_spy_df["Close"].iloc[-1])
+                _pct_hi  = (_spy_cur / _52wk_hi - 1) * 100
+                _pct_lo  = (_spy_cur / _52wk_lo - 1) * 100
+                _qqq_df  = _fetch_spy("QQQ", "2y")
+                _qqq_cur = float(_qqq_df["Close"].iloc[-1]) if _qqq_df is not None else None
+                _qqq_sma200 = (
+                    float(_qqq_df["Close"].rolling(200).mean().iloc[-1])
+                    if _qqq_df is not None and len(_qqq_df) >= 200 else None
+                )
+
+                idx_c1, idx_c2, idx_c3 = st.columns(3)
+                with idx_c1:
+                    _hi_icon = "✅" if _pct_hi >= -15 else "⚠️"
+                    st.metric(f"{_hi_icon} SPY vs 52-wk High", f"{_pct_hi:+.1f}%",
+                              f"High ${_52wk_hi:,.2f}")
+                with idx_c2:
+                    st.metric("✅ SPY vs 52-wk Low", f"+{_pct_lo:.1f}%",
+                              f"Low ${_52wk_lo:,.2f}")
+                with idx_c3:
+                    if _qqq_cur and _qqq_sma200:
+                        _qqq_pct = (_qqq_cur / _qqq_sma200 - 1) * 100
+                        _q_icon = "✅" if _qqq_cur > _qqq_sma200 else "🔴"
+                        st.metric(f"{_q_icon} QQQ vs 200-SMA", f"${_qqq_cur:,.2f}",
+                                  f"{_qqq_pct:+.1f}% | SMA200=${_qqq_sma200:,.0f}")
+        except Exception:
+            pass
+
+        # --- Distribution Days ---
+        st.subheader("📊 Distribution Days")
+        _dist_pct  = min(dist_days / max(settings.DISTRIBUTION_DAYS_DANGER, 1), 1.0)
+        _dist_icon = (
+            "🔴" if dist_days >= settings.DISTRIBUTION_DAYS_DANGER else
+            "🟡" if dist_days >= settings.DISTRIBUTION_DAYS_CAUTION else
+            "🟢"
+        )
+        st.markdown(
+            f"{_dist_icon} **{dist_days} / {settings.DISTRIBUTION_DAYS_DANGER}** "
+            f"distribution days in last {settings.DISTRIBUTION_LOOKBACK} sessions "
+            f"*(IBD definition: close ≥ 0.2% lower on higher volume)*"
+        )
+        st.progress(_dist_pct)
+        if dist_days >= settings.DISTRIBUTION_DAYS_DANGER:
+            st.error(
+                f"⛔ Danger threshold reached — all buy signals suppressed until "
+                f"count drops below {settings.DISTRIBUTION_DAYS_DANGER}"
+            )
+        elif dist_days >= settings.DISTRIBUTION_DAYS_CAUTION:
+            st.warning(
+                f"⚠️ Caution zone — position sizes reduced to 50% "
+                f"(threshold: {settings.DISTRIBUTION_DAYS_CAUTION})"
+            )
         else:
-            display_cols = ["ticker", "vcp_score", "rs_rating", "entry_price",
-                            "stop_price", "stop_pct", "eps_growth", "sector",
-                            "ai_sentiment", "created_at"]
-            display_df = today_df[[c for c in display_cols if c in today_df.columns]].copy()
-            display_df.columns = [c.replace("_", " ").title() for c in display_df.columns]
+            st.success("✅ Distribution count within safe range")
 
-            def _row_colour(score):
-                if score >= 90:
-                    return "background-color: #d4edda"
-                if score >= 80:
-                    return "background-color: #cce5ff"
-                return ""
+        # --- VIX ---
+        st.subheader("😨 VIX — Fear Gauge")
+        _vix_pct  = min(vix / 50.0, 1.0)
+        _vix_zone = (
+            f"🟢 Calm (<{settings.VIX_LOW}) — ideal conditions for momentum stocks"
+            if vix < settings.VIX_LOW else
+            f"🟡 Normal ({settings.VIX_LOW}–{settings.VIX_CAUTION}) — standard conditions"
+            if vix < settings.VIX_CAUTION else
+            f"🟠 Caution ({settings.VIX_CAUTION}–{settings.VIX_DANGER}) — 50% position sizing"
+            if vix < settings.VIX_DANGER else
+            f"🔴 EXTREME (≥{settings.VIX_DANGER}) — all signals suppressed!"
+        )
+        st.markdown(f"**VIX: {vix:.2f}** — {_vix_zone}")
+        st.progress(_vix_pct)
 
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
+        # --- Market Breadth ---
+        st.subheader("🌡️ Market Breadth  (% S&P 500 above 200-SMA)")
+        if breadth is not None:
+            _br_pct  = breadth / 100.0
+            _br_zone = (
+                f"🟢 Healthy bull (≥{settings.BREADTH_BULL}%) — broad participation"
+                if breadth >= settings.BREADTH_BULL else
+                f"🟡 Mixed ({settings.BREADTH_WEAK}–{settings.BREADTH_BULL}%) — selective market"
+                if breadth >= settings.BREADTH_WEAK else
+                f"🟠 Weak ({settings.BREADTH_BEAR}–{settings.BREADTH_WEAK}%) — 75% sizing"
+                if breadth >= settings.BREADTH_BEAR else
+                f"🔴 Bear territory (<{settings.BREADTH_BEAR}%) — signals suppressed!"
+            )
+            st.markdown(f"**{breadth:.1f}%** — {_br_zone}")
+            st.progress(_br_pct)
+        else:
+            st.markdown("Breadth data computing... (runs at 08:00 BST)")
+
+        # --- Follow-Through Day ---
+        st.subheader("📅 Follow-Through Day (FTD)")
+        _ftd_icon = "✅" if ftd else "⚠️"
+        _ftd_msg  = (
+            "Confirmed — rally attempt validated (gain ≥1.7% on higher volume, day 4+)"
+            if ftd else
+            "Not confirmed — no FTD since last correction → aggression capped at 50%"
+        )
+        st.markdown(f"{_ftd_icon} **{'Confirmed' if ftd else 'Unconfirmed'}** — {_ftd_msg}")
+
+        # --- Macro event warning ---
+        if hi_impact:
+            st.subheader("📣 Macro Event Warning")
+            st.warning(
+                "⚠️ **High-impact event within 2 trading days** (CPI / Fed / NFP / PCE / GDP) "
+                "— position sizes automatically reduced to 50%"
             )
 
-    # --- Right: Market Intelligence ---
-    with right:
-        st.subheader("🌍 Market Intelligence")
+        # --- SPY Price Chart ---
+        st.subheader("📈 SPY — Price vs Moving Averages (last 90 sessions)")
+        try:
+            from data.fetcher import fetch_ohlcv as _fspy
+            _df = _fspy("SPY", "2y")
+            if _df is not None and len(_df) >= 50:
+                _n   = min(90, len(_df))
+                _win = _df.iloc[-_n:].copy()
+                _win["SMA50"]  = _df["Close"].rolling(50).mean().iloc[-_n:].values
+                _win["SMA150"] = (
+                    _df["Close"].rolling(150).mean().iloc[-_n:].values
+                    if len(_df) >= 150 else None
+                )
+                _win["SMA200"] = (
+                    _df["Close"].rolling(200).mean().iloc[-_n:].values
+                    if len(_df) >= 200 else None
+                )
+
+                _fig = go.Figure()
+                _fig.add_trace(go.Candlestick(
+                    x=_win.index, open=_win["Open"], high=_win["High"],
+                    low=_win["Low"], close=_win["Close"],
+                    name="SPY",
+                    increasing_line_color="#26a69a",
+                    decreasing_line_color="#ef5350",
+                    increasing_fillcolor="#26a69a",
+                    decreasing_fillcolor="#ef5350",
+                ))
+                _fig.add_trace(go.Scatter(
+                    x=_win.index, y=_win["SMA50"],
+                    name="SMA 50", line=dict(color="#2196F3", width=1.5),
+                ))
+                if _win["SMA150"] is not None:
+                    _fig.add_trace(go.Scatter(
+                        x=_win.index, y=_win["SMA150"],
+                        name="SMA 150", line=dict(color="#FF9800", width=1.5),
+                    ))
+                if _win["SMA200"] is not None:
+                    _fig.add_trace(go.Scatter(
+                        x=_win.index, y=_win["SMA200"],
+                        name="SMA 200", line=dict(color="#F44336", width=2.5),
+                    ))
+                _fig.update_layout(
+                    height=380,
+                    xaxis_rangeslider_visible=False,
+                    margin=dict(l=0, r=0, t=20, b=0),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+                    plot_bgcolor="#0e1117",
+                    paper_bgcolor="#0e1117",
+                    font=dict(color="#fafafa"),
+                    xaxis=dict(gridcolor="#2a2a2a"),
+                    yaxis=dict(gridcolor="#2a2a2a"),
+                )
+                st.plotly_chart(_fig, use_container_width=True)
+        except Exception as _chart_exc:
+            st.info(f"SPY chart unavailable: {_chart_exc}")
+
+    # ===================================================================
+    # RIGHT — Sector status + Active signals
+    # ===================================================================
+    with right_col:
+
+        # --- Sector Stage 2 status ---
+        st.subheader("🏭 Sector Stage 2 Status")
+        st.caption(
+            "Stage 2 = all 8 Minervini Trend Template criteria pass for the sector ETF. "
+            "Only stocks in Stage 2 sectors trigger alerts."
+        )
 
         try:
-            from market_intelligence.sector_analyzer import get_leading_sectors
-            leaders = get_leading_sectors(3)
-            st.markdown("**Top Sector Leaders:**")
-            for s in leaders:
-                stage = "✅" if s.get("stage2") else "❌"
-                st.markdown(f"- **{s['sector']}** ({s['etf']}): "
-                            f"{s['1m_pct']:+.1f}% 1m | {s['3m_pct']:+.1f}% 3m {stage}")
-        except Exception:
-            st.info("Sector data loading...")
+            from market_intelligence.sector_analyzer import fetch_sector_performance
+            _sectors = fetch_sector_performance()
 
-        st.markdown("---")
+            _rows = []
+            for _sec, _d in sorted(
+                _sectors.items(), key=lambda x: x[1].get("3m_pct", 0), reverse=True
+            ):
+                _rows.append({
+                    "Sector": _sec,
+                    "ETF": _d.get("etf", ""),
+                    "1m %": f"{_d.get('1m_pct', 0):+.1f}%",
+                    "3m %": f"{_d.get('3m_pct', 0):+.1f}%",
+                    "TT": f"{_d.get('tt_score', 0)}/8",
+                    "Stage 2": "✅" if _d.get("stage2") else "❌",
+                })
 
-        dist_days = regime_data.get("distribution_days", 0)
-        st.markdown(f"**Distribution Days:** {dist_days}/{settings.DISTRIBUTION_DAYS_DANGER}")
-        st.progress(min(dist_days / settings.DISTRIBUTION_DAYS_DANGER, 1.0))
+            if _rows:
+                _sec_df = pd.DataFrame(_rows)
+                st.dataframe(
+                    _sec_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=350,
+                    column_config={
+                        "Stage 2": st.column_config.TextColumn("Stage 2", width="small"),
+                        "TT":      st.column_config.TextColumn("TT Score", width="small"),
+                    },
+                )
+                _n_stage2 = sum(1 for r in _rows if r["Stage 2"] == "✅")
+                _total    = len(_rows)
+                if _n_stage2 == 0:
+                    st.error(f"⛔ No sectors in Stage 2 — all alerts gated (0/{_total})")
+                elif _n_stage2 <= 3:
+                    st.warning(f"⚠️ Only {_n_stage2}/{_total} sectors in Stage 2 — limited opportunities")
+                else:
+                    st.success(f"✅ {_n_stage2}/{_total} sectors in Stage 2 — broad opportunity")
+        except Exception as _sec_exc:
+            st.info(f"Sector data loading… ({_sec_exc})")
 
-        if breadth is not None:
-            st.markdown(f"**Market Breadth (% above 200-SMA):** {breadth:.1f}%")
-            st.progress(breadth / 100)
+        st.divider()
 
-        st.markdown(f"**Regime Summary:** {regime_data.get('regime_summary', '')}")
-        st.markdown(f"**Aggression Factor:** {regime_data.get('aggression_factor', 1.0):.0%}")
+        # --- Active Buy Signals ---
+        st.subheader("🚀 Active Buy Signals (Today)")
+
+        if not signals_df.empty:
+            _today_df = signals_df[signals_df["date"] == today_str].copy()
+        else:
+            _today_df = pd.DataFrame()
+
+        if _today_df.empty:
+            if not regime_data.get("signals_allowed", True):
+                st.warning("🔇 Signals suppressed by regime gate")
+            else:
+                st.info("No signals generated today yet.")
+        else:
+            _disp_cols = ["ticker", "vcp_score", "entry_price", "stop_pct",
+                          "rs_rating", "sector", "ai_sentiment"]
+            _disp      = _today_df[[c for c in _disp_cols if c in _today_df.columns]].copy()
+            _disp.columns = [c.replace("_", " ").title() for c in _disp.columns]
+            st.dataframe(_disp, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # --- Watchlist near pivot ---
+        st.subheader("🎯 Watchlist — Near Pivot")
+        if not watchlist_df.empty and "pivot_price" in watchlist_df.columns:
+            try:
+                from data.fetcher import fetch_latest_price as _flp
+                _near = []
+                for _, _row in watchlist_df.head(30).iterrows():
+                    _pivot = _row.get("pivot_price")
+                    if not _pivot:
+                        continue
+                    _cur = _flp(_row["ticker"])
+                    if _cur and _pivot:
+                        _pct = (_cur / _pivot - 1) * 100
+                        if abs(_pct) <= 5.0:
+                            _near.append({
+                                "Ticker": _row["ticker"],
+                                "Score": int(_row.get("vcp_score", 0)),
+                                "Current": f"${_cur:.2f}",
+                                "Pivot": f"${_pivot:.2f}",
+                                "Δ%": f"{_pct:+.1f}%",
+                            })
+                if _near:
+                    st.dataframe(pd.DataFrame(_near), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No watchlist stocks within 5% of pivot.")
+            except Exception:
+                st.caption("Near-pivot check skipped (live price unavailable)")
+        elif watchlist_df.empty:
+            st.info("Watchlist is empty — run a full scan.")
 
     # Auto-refresh via rerun
     time.sleep(settings.DASHBOARD_REFRESH_SECONDS)
