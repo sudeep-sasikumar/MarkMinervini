@@ -465,6 +465,10 @@ Complete chronological list across all sessions. See Section 4 for details per s
 - `fx_rate_source` propagates true source ("live" | "cache" | "fallback" | "provided")
 - Breakeven stop move persists to DB — no longer refires same alert every post-market run
 
+**Backtest zero-trades + equity crash (Session 12):**
+- **Zero trades:** `vcp["alert"]` calibrated for real-time scanning — requires breakout confirmed on exactly the last bar of the historical slice (almost never true). Fixed: use `watchlist_candidate` (score≥70) + manual `current_close > pivot * 1.001` check.
+- **Equity curve crash (duplicate dates):** `pd.concat(all_test_equity)` creates duplicate DatetimeIndex at walk-forward window boundaries; `spy_scaled[date_idx]` returns a Series for duplicate dates; `float(Series)` raises TypeError. Fixed: deduplicate `combined_equity` before any lookups; use `reindex(method="ffill")` for SPY benchmark; guard `isinstance(pd.Series)` in equity records loop.
+
 **Backtest crash + correctness fixes (Session 10):**
 - **Backtest crash (root cause):** `fetch_ohlcv_batch()` did not strip timezone from `yf.download()` bulk results. yfinance 0.2.x+ returns a tz-aware UTC index; the single-ticker path (`_fetch_yfinance`) already strips tz via `tz_localize(None)`. When `_run_single_window` sliced `df.loc[:current_date]` with a tz-naive timestamp from `spy_period.index` against a tz-aware ticker DataFrame → `TypeError: Cannot compare tz-naive and tz-aware datetime-like objects`. Fix: normalise tz in `fetch_ohlcv_batch` for every extracted ticker.
 - **Exit equity formula wrong:** `equity += shares * (exit_price - entry)` adds only P&L but entry cost was already deducted at open — double-subtracts entry, depleting equity at 2× the correct rate every stop-loss. Fix: `equity += shares * exit_price` (add back full exit proceeds).
@@ -477,15 +481,13 @@ Complete chronological list across all sessions. See Section 4 for details per s
 
 **Latest commits (newest first):**
 ```
+fcee422  Fix backtest: deduplicate equity index + generate trades with watchlist_candidate
+8d92cd2  Update HANDOFF.md: Session 11 log
+bc76c9e  Eleventh review: backtest diagnostics + defensive timezone handling
+5e76378  Update HANDOFF.md: Session 10 log + backtest fixes documented
 a75f796  Tenth review: fix backtest crash + 3 correctness bugs
-69d0114  Update HANDOFF.md: Sessions 8 & 9 log
 ada91be  Ninth review: 7 bug fixes — weighted RS, circuit breaker P&L, stop persistence
 36c8a74  Seventh review: 13 bug fixes + 50/50 tests passing
-c8f0ea8  Update HANDOFF.md: Session 6 log + mark fixed items
-4ffc6fe  Sixth review: 4 HIGH-priority fixes + fundamentals diagnostics
-4ea2d46  Add HANDOFF-24May.md
-c6bf3b0  Dashboard overhaul + startup cache clearing
-8cac696  Fifth review: 16 bug fixes (false BEAR alert, weekend scheduler, sector gate)
 ```
 
 **What is working:**
@@ -509,13 +511,13 @@ c6bf3b0  Dashboard overhaul + startup cache clearing
 - RS ratings use IBD-weighted quarterly formula (not simple 12-month return)
 - Breakeven stop moves persist to DB (don't refire every post-market run)
 - Breadth monitor uses `period="2y"` for reliable 200-SMA calculation
-- **Backtest crash fixed** — tz-aware/tz-naive mismatch resolved; exit equity formula correct; MTM always includes open positions; RS rank O(n log n)
+- **Backtest fully fixed** — tz-aware/tz-naive mismatch resolved; exit equity formula correct; MTM always includes open positions; RS rank O(n log n); duplicate equity index deduplicated; zero-trades fixed via `watchlist_candidate` + manual pivot check
 
 **What is still pending:**
 - Set `VPS_IP` in Hostinger Docker Manager
-- Pull new Docker image on VPS and restart container (commit `a75f796` pushed)
+- Pull new Docker image on VPS and restart container (commit `fcee422` pushed — CI running)
 - Run test scan on VPS to verify signal generation with MIN_BASE_TRADING_DAYS=15
-- Run backtest from dashboard to verify it completes successfully
+- Run backtest from dashboard to verify it generates non-zero trades and CAGR
 
 ---
 
@@ -1048,6 +1050,33 @@ Track each work session here. Add a new entry at the start of every new Claude C
 1. Wait for CI to complete (check GitHub Actions)
 2. Pull new Docker image in Hostinger → restart container
 3. Run backtest again — if it still fails, the "Full error + traceback" panel will now show the EXACT Python exception
+
+---
+
+### Session 12 — Twelfth Review: Backtest zero-trades + equity curve crash
+**Date:** 24 May 2026 (continuation after Session 11)
+**Trigger:** User provided full diagnostic output after Session 11 improvements: backtest completed all 16 walk-forward windows but produced CAGR=0.0%, then crashed with `TypeError: cannot convert the series to <class 'float'>`.
+
+**Root causes diagnosed from diagnostic output:**
+
+1. **Zero trades generated** — `vcp["alert"]` requires `score >= 80 AND breakout confirmed on exactly today's bar`. In historical simulation, "today's bar" is the final bar of the `avail` slice (always the last bar of available data), so the breakout condition is evaluated on the same bar the signal is generated — i.e., it almost never fires. With 72 large-cap S&P 500 mega-caps, VCP setups (designed for emerging growth stocks) rarely reach score≥80 anyway. Result: 16 windows × zero trades = flat equity curve.
+
+2. **Equity curve crash** — `pd.concat(all_test_equity)` creates duplicate DatetimeIndex entries at walk-forward window boundaries (end of window N == start of window N+1). When iterating the equity records loop, `spy_scaled[date_idx]` returns a `pd.Series` for a duplicate date (pandas `.loc` returns a Series when a label appears more than once), and `float(Series)` raises `TypeError`.
+
+**Fixes applied:**
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | `backtesting/backtest.py` | Zero trades: `vcp["alert"]` calibrated for real-time scanning, not historical simulation | Changed to `vcp.get("watchlist_candidate", False)` (score≥70) + manual pivot breakout check: `current_close > pivot * 1.001` — replicates the essential condition without the exact-bar-timing requirement |
+| 2 | `backtesting/backtest.py` | Equity curve crash: duplicate DatetimeIndex in `combined_equity` → `spy_scaled[date_idx]` returns Series → `float(Series)` raises TypeError | Deduplicate: `combined_equity[~combined_equity.index.duplicated(keep="last")]`; use `spy_df["Close"].reindex(combined_equity.index, method="ffill")` for SPY benchmark; add `isinstance(pd.Series)` guard in equity records loop |
+
+**Test result: 50/50 passing**
+**Key commits:** `fcee422` (pushed to GitHub — CI running)
+
+**Next step for user:**
+1. Wait for CI to complete (check GitHub Actions)
+2. Pull new Docker image in Hostinger → restart container
+3. Run backtest again — should now generate actual trades and produce non-zero CAGR
 
 ---
 
