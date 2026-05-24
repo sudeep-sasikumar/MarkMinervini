@@ -229,6 +229,22 @@ MarkMinervini/
 
 ## 4. Full Build History
 
+### Session 6 — Sixth Review: 4 HIGH-priority fixes + Fundamentals Diagnostics (24 May 2026 — new session)
+
+**Trigger:** Resuming from Session 5 handoff. Tackling HIGH-priority items from HANDOFF.md §12B.
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | `regime_detector.py` | Distribution days ≥ DANGER (5) alone triggered BEAR even when SPY was 10%+ above SMA200 | Compound gate: full suppression ONLY when `dist_days ≥ DANGER AND spy_above_sma200 is False`; when SPY is above SMA200, reduces aggression to 25% but keeps `signals_allowed=True` |
+| 2 | `main.py` | No universe coverage check — if <80% of tickers loaded due to API failure, RS rankings were silently skewed | Added abort if `len(price_data) < len(universe) * 0.8`; warns (not abort) at 80–95% coverage |
+| 3 | `main.py` | `_get_ticker_sector()` called twice per ticker (at score≥70 and again at score≥80) | Moved single `sector_info = _get_ticker_sector(ticker)` call to top of inner loop |
+| 4 | `main.py` | `get_sector_stage2_status()` called three times per alert (gate check, `format_breakout_alert()`, and implicit reuse) | Saved result from gate check and reused in `format_breakout_alert()` |
+| 5 | `data/fundamentals.py` | `_parse_quarterly()` EPS/revenue label mismatches were silent — impossible to diagnose | Added DEBUG logging: lists first 15 available IC labels when EPS/revenue not matched; logs when AV fallback triggered; logs per-ticker summary |
+
+**Key commits:** `4ffc6fe`
+
+---
+
 ### Session 1 — Initial System Build
 
 **What was built:** The entire 48-file system from scratch.
@@ -401,10 +417,11 @@ Complete chronological list across all sessions. See Section 4 for details per s
 
 ---
 
-## 6. Current System State (as of 24 May 2026)
+## 6. Current System State (as of 24 May 2026 — Session 6)
 
 **Latest commits (newest first):**
 ```
+4ffc6fe  Sixth review: 4 HIGH-priority fixes + fundamentals diagnostics
 4ea2d46  Add HANDOFF-24May.md
 c6bf3b0  Dashboard overhaul + startup cache clearing
 8cac696  Fifth review: 16 bug fixes (false BEAR alert, weekend scheduler, sector gate)
@@ -769,17 +786,17 @@ Job 2: build-and-push (needs: lint-and-test)
 
 | Priority | File | Issue | Suggested Fix |
 |---|---|---|---|
-| HIGH | `regime_detector.py` | Dist_days ≥ 5 alone triggers BEAR even when SPY is 10%+ above SMA200. In a technically healthy market this creates false BEAR. | Consider compound gate: BEAR only when `dist_days ≥ 5 AND spy_above_sma200 = False`. Or raise danger threshold to 7. |
+| ~~HIGH~~ ✅ | ~~`regime_detector.py`~~ | ~~Dist_days ≥ 5 alone triggers BEAR even when SPY is 10%+ above SMA200~~ | **FIXED in Session 6** — compound gate: full suppression only when SPY is also below SMA200 |
 | HIGH | Hostinger env vars | `VPS_IP` not yet set → dashboard links in Telegram show "YOUR_VPS_IP" | Add `VPS_IP=your_server_ip` in Hostinger Docker Manager |
-| HIGH | `screening/rs_calculator.py` | No minimum universe coverage check — if <80% of universe loads due to API failure, RS rankings are meaningless but scan proceeds silently | Add: if `len(price_data) < len(universe) * 0.8: raise RuntimeError(...)` |
-| HIGH | `main.py` | `_get_ticker_sector()` called twice per ticker (at score≥70 for watchlist, at score≥80 for alert gate) | Cache result in local dict keyed by ticker at start of inner loop |
+| ~~HIGH~~ ✅ | ~~`main.py`~~ | ~~No minimum universe coverage check~~ | **FIXED in Session 6** — aborts if <80% of universe loads |
+| ~~HIGH~~ ✅ | ~~`main.py`~~ | ~~`_get_ticker_sector()` called twice per ticker~~ | **FIXED in Session 6** — single call at top of inner loop |
 
 ### 12C. MEDIUM Priority
 
 | Priority | Item |
 |---|---|
 | MEDIUM | **Verify VCP score ≥ 80 calibration** — `MIN_BASE_TRADING_DAYS=60` is stricter (was 15). Fewer setups will pass Step 3. May need to run a test scan to verify we still get watchlist candidates |
-| MEDIUM | **`data/fundamentals.py`** — `_parse_quarterly` EPS label matching is fragile. Many valid Finnhub IC labels may not match `"eps"`, `"earningspersharediluted"` etc. Should log how often `eps_growth_yoy` returns None vs found |
+| ~~MEDIUM~~ ✅ | ~~**`data/fundamentals.py`** — `_parse_quarterly` EPS label matching is fragile. Should log how often `eps_growth_yoy` returns None~~ | **FIXED in Session 6** — DEBUG logs now list available IC labels on every mismatch and AV fallback trigger |
 | MEDIUM | **`data/fetcher.py`** — No central Finnhub rate limiter. Only `fundamentals.py` has one now. If other modules ever call Finnhub directly they bypass it |
 | MEDIUM | **Run `python main.py --test-mode`** on VPS to confirm full pipeline end-to-end produces at least one watchlist candidate from live market data |
 | MEDIUM | **Paper trading phase** — system is built but never paper-traded. Run for 2–4 weeks to validate that stocks reaching score≥80 are genuinely setting up for breakouts |
@@ -845,7 +862,19 @@ Track each work session here. Add a new entry at the start of every new Claude C
 
 ---
 
-### Session 6 — (next session — fill in here)
+### Session 6 — Sixth Review: HIGH-priority fixes
+**Date:** 24 May 2026 (new context window after Session 5)
+**Focus:** 4 HIGH-priority items from HANDOFF.md §12B + fundamentals diagnostic logging
+**Outcome:**
+- Distribution days compound gate: no longer triggers BEAR when SPY is above SMA200 (was the root cause of the 24 May false alert — the 0.2% minimum fixed over-counting, but even with correct counting, 5+ dist days in a volatile bull market was still causing suppression)
+- Universe coverage abort guard: scan will not proceed with skewed RS rankings if <80% of universe loaded
+- Eliminated duplicate `_get_ticker_sector()` and `get_sector_stage2_status()` calls per ticker
+- DEBUG logging for Finnhub label mismatches so fragile `_parse_quarterly` issues surface in logs
+**Key commits:** `4ffc6fe`
+
+---
+
+### Session 7 — (next session — fill in here)
 **Date:**
 **Focus:**
 **Outcome:**
