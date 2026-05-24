@@ -1,0 +1,8 @@
+# Minimum dependencies for running the unit test suite in CI.
+# Excludes heavy packages (streamlit, plotly, ollama, APScheduler, finnhub)
+# that are needed for the live app but not for unit tests.
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0,<3.0.0
+yfinance>=0.2.40           # needed when patching data.fetcher in tests
+python-dotenv>=1.0.0       # config/settings.py
+pytest>=7.0.0

@@ -6,7 +6,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: syntax check + unit tests
+  # Must pass before the Docker image is built.
+  # -------------------------------------------------------------------------
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install -r MarkMinervini/requirements-test.txt
+
+      - name: Syntax check — compileall
+        run: python -m compileall -q MarkMinervini
+
+      - name: Run unit tests
+        run: pytest MarkMinervini/tests/ -v --tb=short
+
+  # -------------------------------------------------------------------------
+  # Job 2: build and push multi-arch Docker image
+  # Only runs after lint-and-test passes.
+  # -------------------------------------------------------------------------
   build-and-push:
+    needs: lint-and-test
     runs-on: ubuntu-latest
     permissions:
       contents: read
