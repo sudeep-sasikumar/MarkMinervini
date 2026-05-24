@@ -65,6 +65,23 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         price_data = fetch_ohlcv_batch(universe, period="2y")
         logger.info("Price data loaded: %d tickers with sufficient history", len(price_data))
 
+        # Universe coverage check — abort if fewer than 80% of tickers loaded.
+        # A mass API failure would silently produce meaningless RS rankings that
+        # make every stock look like a leader (or bottom-dweller).
+        coverage_pct = len(price_data) / max(len(universe), 1) * 100
+        if len(price_data) < len(universe) * 0.8:
+            logger.error(
+                "Universe coverage too low: %d/%d tickers loaded (%.0f%%). "
+                "API failure suspected — aborting scan to prevent misleading RS rankings.",
+                len(price_data), len(universe), coverage_pct,
+            )
+            return signals_generated
+        elif coverage_pct < 95:
+            logger.warning(
+                "Universe coverage %.0f%% (%d/%d). Some RS rankings may be slightly skewed.",
+                coverage_pct, len(price_data), len(universe),
+            )
+
         spy_df = fetch_spy_ohlcv()
 
         # --- Step 2: RS Ratings (entire universe, vectorised) ---
@@ -128,7 +145,7 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         from market_intelligence.ai_analyst import analyse_news_catalyst, analyse_earnings_quality
         from alerts.alert_formatter import format_breakout_alert
         from alerts.telegram_bot import send_message
-        from database.db import insert_signal, mark_telegram_sent, upsert_watchlist
+        from database.db import insert_signal, mark_telegram_sent, upsert_watchlist, insert_setup
 
         drawdown = get_portfolio_drawdown()
         dd_aggression, dd_warning = get_aggression_from_drawdown(drawdown)
@@ -147,6 +164,8 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
             "signals": 0,
         }
 
+        import json as _json
+
         for ticker, df, tt, rs, fund in fundamentals_passed:
             try:
                 # RS line new high check
@@ -159,11 +178,14 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                                  rs_line_new_high=rs_line_nh)
                 vcp = enrich_vcp_result(vcp)
 
+                # Fetch sector/name info once per ticker (SQLite-cached TTL_7D,
+                # so effectively free on repeated calls; avoids the double-call
+                # pattern where it was fetched again at the alert gate below).
+                sector_info = _get_ticker_sector(ticker)
+
                 # Add to watchlist/setups if score >= 70 (moderate VCP — setup forming)
                 if vcp["vcp_score"] >= 70:
                     scan_funnel["vcp"] += 1
-                    sector_info = _get_ticker_sector(ticker)
-                    import json as _json
                     upsert_watchlist(ticker, {
                         "ticker": ticker,
                         "company_name": sector_info.get("name", ticker),
@@ -189,7 +211,6 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                         "last_updated": today,
                     })
                     # Also persist a full setup snapshot for audit trail and intraday engine
-                    from database.db import insert_setup
                     insert_setup({
                         "ticker": ticker,
                         "date": today,
@@ -230,10 +251,11 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                     )
                     continue
 
-                # Sector stage2 gate
-                sector_info = _get_ticker_sector(ticker)
+                # Sector stage2 gate — result saved to avoid a second call when
+                # formatting the alert (previously called twice: gate check + formatter arg)
                 sector = sector_info.get("sector", "Unknown")
-                if not get_sector_stage2_status(sector):
+                sector_stage2 = get_sector_stage2_status(sector)
+                if not sector_stage2:
                     logger.info("Sector gate blocked %s (sector=%s not Stage 2)", ticker, sector)
                     continue
 
@@ -262,7 +284,7 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
 
                 # Format and send alert
                 company = sector_info.get("name", ticker)
-                sector_stage2 = get_sector_stage2_status(sector)
+                # sector_stage2 already fetched above — reuse it (no redundant call)
                 alert_msg = format_breakout_alert(
                     ticker=ticker,
                     company_name=company,

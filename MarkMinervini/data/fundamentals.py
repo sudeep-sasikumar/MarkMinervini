@@ -154,6 +154,10 @@ def _build_fundamentals(ticker: str) -> dict:
 
     # --- Fallback to Alpha Vantage if Finnhub gave nothing useful ---
     if base["eps_growth_yoy"] is None and base["status"] != "ok":
+        logger.debug(
+            "Fundamentals %s: Finnhub gave no EPS growth — trying Alpha Vantage fallback",
+            ticker,
+        )
         _alpha_vantage_fallback(ticker, base)
 
     # --- Compute hard gates ---
@@ -183,6 +187,16 @@ def _build_fundamentals(ticker: str) -> dict:
         score += 2
     base["fundamentals_score"] = min(score, 10)
 
+    logger.debug(
+        "Fundamentals %s: status=%s eps_growth_yoy=%s rev_growth_yoy=%s "
+        "passes_hard_gates=%s score=%d",
+        ticker,
+        base["status"],
+        f"{base['eps_growth_yoy']:.1f}%" if base["eps_growth_yoy"] is not None else "None",
+        f"{base['rev_growth_yoy']:.1f}%" if base["rev_growth_yoy"] is not None else "None",
+        base["passes_hard_gates"],
+        base["fundamentals_score"],
+    )
     return base
 
 
@@ -217,8 +231,26 @@ def _parse_quarterly(reports: list, base: dict) -> None:
 
         if eps_now is not None and eps_ly is not None and eps_ly != 0:
             base["eps_growth_yoy"] = (eps_now - eps_ly) / abs(eps_ly) * 100
+        else:
+            # Log available IC labels so we can extend the search list if needed.
+            # This is the most common silent failure — Finnhub label varies by company.
+            q0_labels = [
+                c.get("label", "") for c in q0.get("report", {}).get("ic", [])
+            ]
+            logger.debug(
+                "Fundamentals %s: EPS label not matched. "
+                "eps_now=%s eps_ly=%s | q0 IC labels (first 15): %s",
+                base.get("ticker"), eps_now, eps_ly, q0_labels[:15],
+            )
+
         if rev_now is not None and rev_ly is not None and rev_ly != 0:
             base["rev_growth_yoy"] = (rev_now - rev_ly) / abs(rev_ly) * 100
+        else:
+            logger.debug(
+                "Fundamentals %s: revenue label not matched. rev_now=%s rev_ly=%s",
+                base.get("ticker"), rev_now, rev_ly,
+            )
+
         if gp_now is not None and rev_now and rev_now != 0:
             base["gross_margin_current"] = gp_now / rev_now * 100
         if gp_ly is not None and rev_ly and rev_ly != 0:

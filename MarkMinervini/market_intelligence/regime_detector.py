@@ -114,9 +114,29 @@ def _assess_regime(
             spy_df.tail(settings.DISTRIBUTION_LOOKBACK + 1)
         )
         if dist_days >= settings.DISTRIBUTION_DAYS_DANGER:
-            signals_allowed = False
-            aggression = 0.0
-            issues.append(f"Distribution days {dist_days} >= danger threshold {settings.DISTRIBUTION_DAYS_DANGER}")
+            if not spy_above_sma200:
+                # Compound gate: full suppression only when SPY is already in a
+                # downtrend.  Prevents false BEAR calls when SPY is 10%+ above
+                # SMA200 but the market is merely volatile (not in a bear).
+                # `spy_above_sma200` is None when SPY data unavailable — be
+                # conservative and treat that as "not above" (i.e., suppress).
+                signals_allowed = False
+                aggression = 0.0
+                issues.append(
+                    f"Distribution days {dist_days} >= danger threshold "
+                    f"{settings.DISTRIBUTION_DAYS_DANGER} "
+                    f"(SPY {'below' if spy_above_sma200 is False else 'data unavailable'} SMA200 — confirmed BEAR)"
+                )
+            else:
+                # SPY still above SMA200: heavy distribution is a serious warning
+                # but the market is not technically in a downtrend.
+                # Reduce to 25% sizing (caution without full suppression).
+                aggression = min(aggression, 0.25)
+                issues.append(
+                    f"Distribution days {dist_days} >= danger threshold "
+                    f"{settings.DISTRIBUTION_DAYS_DANGER} — heavy institutional selling "
+                    f"(quarter-size caution; SPY still above SMA200)"
+                )
         elif dist_days >= settings.DISTRIBUTION_DAYS_CAUTION:
             aggression = min(aggression, 0.5)
             issues.append(f"Distribution days {dist_days} — caution")
