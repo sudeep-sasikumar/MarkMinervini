@@ -68,21 +68,22 @@ def compute_position_size(
           "note": str,
           # Legacy alias
           "position_value": float,      # = position_value_gbp
-          "risk_dollars": float,        # = risk_gbp
+          "risk_dollars": float,        # legacy alias = risk_usd
         }
     """
     fx_warning = False
-    # Fetch live GBPUSD if not supplied
+    # Fetch live GBPUSD if not supplied.
+    # Use fetch_gbpusd_with_source() so we can reliably detect whether the
+    # returned rate is live or a hardcoded fallback — fetch_gbpusd() swallows
+    # its own exception and returns 1.27 silently, so we would never know.
     if gbpusd_rate is None:
-        try:
-            from data.fetcher import fetch_gbpusd
-            gbpusd_rate = fetch_gbpusd()
-        except Exception:
-            gbpusd_rate = 1.27  # safe fallback
+        from data.fetcher import fetch_gbpusd_with_source
+        fx = fetch_gbpusd_with_source()
+        gbpusd_rate = fx["rate"]
+        if fx["source"] == "fallback":
             fx_warning = True
-            logger.warning("GBPUSD fetch failed — using fallback rate 1.27; verify position size manually")
+            logger.warning("GBPUSD fetch used fallback rate 1.27 — verify position size manually")
 
-    fx_live = gbpusd_rate is not None  # True if caller supplied a rate (vs internal fetch)
     result = {
         "shares": 0,
         "position_value_usd": 0.0,
@@ -91,12 +92,12 @@ def compute_position_size(
         "position_pct": 0.0,
         "risk_gbp": 0.0,
         "risk_usd": 0.0,
-        "risk_dollars": 0.0,          # alias = risk_usd (NOT risk_gbp — USD matches "dollars")
+        "risk_dollars": 0.0,          # legacy alias = risk_usd
         "risk_pct": 0.0,
         "stop_pct": 0.0,
         "gbpusd_rate": gbpusd_rate,
-        "fx_rate_source": "live" if fx_live else "fetched",
-        "fx_warning": False,
+        "fx_rate_source": "fallback" if fx_warning else "live",
+        "fx_warning": fx_warning,
         "valid": False,
         "note": "",
     }

@@ -208,17 +208,20 @@ def fetch_intraday_ohlcv(ticker: str, interval: str = "5m") -> Optional[pd.DataF
         return None
 
 
-def fetch_gbpusd() -> float:
+def fetch_gbpusd_with_source() -> dict:
     """
     Fetch current GBP/USD FX rate via yfinance.
-    Returns the rate (e.g. 1.27 means £1 = $1.27).
-    Falls back to 1.27 if unavailable (reasonable approximation).
+    Returns {"rate": float, "source": "cache" | "live" | "fallback"}.
+
+    Callers that need to know whether the rate is live or a fallback should
+    use this function and inspect "source". The plain fetch_gbpusd() wrapper
+    exists for backward-compatibility with callers that only need the rate.
     Cached for 1 hour.
     """
     cache_key = "fx:gbpusd"
     cached = cache_get(cache_key)
     if cached is not None:
-        return float(cached)
+        return {"rate": float(cached), "source": "cache"}
     try:
         gbpusd = yf.Ticker("GBPUSD=X")
         hist = gbpusd.history(period="5d")
@@ -226,10 +229,19 @@ def fetch_gbpusd() -> float:
             raise ValueError("Empty GBPUSD history")
         rate = float(hist["Close"].iloc[-1])
         cache_set(cache_key, rate, ttl_seconds=3600)
-        return rate
+        return {"rate": rate, "source": "live"}
     except Exception as exc:
         logger.warning("fetch_gbpusd failed (%s) — using fallback rate 1.27", exc)
-        return 1.27  # reasonable fallback; avoids hard crash
+        return {"rate": 1.27, "source": "fallback"}
+
+
+def fetch_gbpusd() -> float:
+    """
+    Backward-compatible wrapper around fetch_gbpusd_with_source().
+    Returns the rate only; use fetch_gbpusd_with_source() when you also
+    need to know whether the rate is live, cached, or a fallback.
+    """
+    return fetch_gbpusd_with_source()["rate"]
 
 
 def fetch_vix() -> Optional[float]:

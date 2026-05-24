@@ -490,9 +490,12 @@ def _send_intraday_breakout_alert(
             return
 
         vcp_score = watchlist_row["vcp_score"] or 0
-        stop_pct = watchlist_row["stop_pct"] or 0
-        # Use R-multiple targets (2R/3R) based on actual price risk, not stop_pct percentage
+        # Recalculate stop_pct from the live intraday entry and stored stop.
+        # The watchlist value was computed at setup entry — if the stock has
+        # already moved above that price, the stored percentage is stale and
+        # would understate true risk to the trader.
         risk_per_share = entry_price - stop_price
+        stop_pct = risk_per_share / entry_price * 100
         target_1 = entry_price + 2 * risk_per_share
         target_2 = entry_price + 3 * risk_per_share
 

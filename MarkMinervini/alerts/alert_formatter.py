@@ -137,7 +137,10 @@ def format_breakout_alert(
     )
 
     if fx_warning_flag:
-        msg += "  ⚠️ FX fallback rate — verify size manually\n"
+        msg += "⚠️ FX fallback rate — verify size manually\n"
+
+    if regime.get("high_impact_event_imminent"):
+        msg += "⚠️ High-impact macro event imminent — reduced size applied\n"
 
     if earnings_warning:
         msg += f"\n{earnings_warning}\n"
