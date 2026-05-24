@@ -491,30 +491,42 @@ def _send_intraday_breakout_alert(
 
         vcp_score = watchlist_row["vcp_score"] or 0
         stop_pct = watchlist_row["stop_pct"] or 0
-        target_1 = entry_price * (1 + stop_pct / 100 * 2) if stop_pct else None
-        target_2 = entry_price * (1 + stop_pct / 100 * 3) if stop_pct else None
+        # Use R-multiple targets (2R/3R) based on actual price risk, not stop_pct percentage
+        risk_per_share = entry_price - stop_price
+        target_1 = entry_price + 2 * risk_per_share
+        target_2 = entry_price + 3 * risk_per_share
 
-        fx_warn = " ⚠️ FX fallback rate used — verify size" if position.get("fx_warning") else ""
-        intraday_msg = (
-            f"🚨 INTRADAY BREAKOUT ALERT — {ticker}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Price:    ${current_price:.2f}  (pivot ${pivot:.2f})\n"
-            f"Volume:   {volume_pace_ratio:.1f}× average (projected full-day)\n"
-            f"VCP Score: {vcp_score}\n\n"
-            f"ENTRY:    ${entry_price:.2f}\n"
-            f"STOP:     ${stop_price:.2f}  (-{stop_pct:.1f}%)\n"
-            f"T1 (2R):  ${target_1:.2f}\n" if target_1 else ""
-            f"T2 (3R):  ${target_2:.2f}\n" if target_2 else ""
-            f"\nSIZE ({settings.RISK_PER_TRADE_PCT*100:.1f}% risk, "
-            f"£{settings.ACCOUNT_EQUITY_GBP:,.0f}):\n"
-            f"  Shares: {position['shares']:,}\n"
-            f"  Position: ${position['position_value_usd']:,.0f} USD "
-            f"/ £{position['position_value_gbp']:,.0f} GBP "
-            f"({position['position_pct']:.1f}%)\n"
-            f"  Max loss: £{position['risk_gbp']:,.0f}{fx_warn}\n\n"
-            f"⚠️ Execute MANUALLY in Trading 212 ISA\n"
-            f"Signal: INTRADAY_BREAKOUT | Regime: {regime['regime']}"
-        )
+        # Build message as a list of lines — avoids Python precedence bugs with
+        # conditional expressions inside implicit f-string concatenation blocks.
+        msg_lines = [
+            f"🚨 INTRADAY BREAKOUT ALERT — {ticker}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"Price:    ${current_price:.2f}  (pivot ${pivot:.2f})",
+            f"Volume:   {volume_pace_ratio:.1f}× average (projected full-day)",
+            f"VCP Score: {vcp_score}",
+            "",
+            f"ENTRY:    ${entry_price:.2f}",
+            f"STOP:     ${stop_price:.2f}  (-{stop_pct:.1f}%)",
+            f"T1 (2R):  ${target_1:.2f}",
+            f"T2 (3R):  ${target_2:.2f}",
+            "",
+            f"SIZE ({settings.RISK_PER_TRADE_PCT*100:.1f}% risk, £{settings.ACCOUNT_EQUITY_GBP:,.0f}):",
+            f"  Shares: {position['shares']:,}",
+            (
+                f"  Position: ${position['position_value_usd']:,.0f} USD"
+                f" / £{position['position_value_gbp']:,.0f} GBP"
+                f" ({position['position_pct']:.1f}%)"
+            ),
+            f"  Max loss: £{position['risk_gbp']:,.0f} / ${position['risk_usd']:,.0f}",
+        ]
+        if position.get("fx_warning"):
+            msg_lines.append("  ⚠️ FX fallback rate — verify size manually")
+        msg_lines += [
+            "",
+            "⚠️ Execute MANUALLY in Trading 212 ISA",
+            f"Signal: INTRADAY_BREAKOUT | Regime: {regime['regime']}",
+        ]
+        intraday_msg = "\n".join(msg_lines)
         if earn_status["action"] == "warn":
             intraday_msg += f"\n⚠️ {earn_status['message']}"
         if regime.get("high_impact_event_imminent"):

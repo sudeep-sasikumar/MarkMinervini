@@ -84,11 +84,15 @@ def format_breakout_alert(
     tt_score = trend.get("score", 0)
     tt_str = f"✅ All {tt_score} Pass" if tt_score == 8 else f"⚠️ {tt_score}/8"
 
-    # Position sizing
+    # Position sizing — separate GBP and USD fields
     shares = position.get("shares", 0)
-    pos_val = position.get("position_value", 0.0)
+    pos_val_gbp = position.get("position_value_gbp", position.get("position_value", 0.0))
+    pos_val_usd = position.get("position_value_usd", 0.0)
     pos_pct = position.get("position_pct", 0.0)
-    risk_gbp = position.get("risk_dollars", 0.0)
+    risk_gbp = position.get("risk_gbp", 0.0)       # correct field name (GBP)
+    risk_usd = position.get("risk_usd", 0.0)       # USD equivalent
+    fx_rate = position.get("gbpusd_rate", 1.27)
+    fx_warning_flag = position.get("fx_warning", False)
 
     # Sector
     sector_str = f"{sector} {'✅ Stage 2' if sector_stage2 else '⚠️ Not Stage 2'}"
@@ -128,9 +132,12 @@ def format_breakout_alert(
         f"\n"
         f"💼 SIZE ({settings.RISK_PER_TRADE_PCT*100:.1f}% risk, "
         f"£{settings.ACCOUNT_EQUITY_GBP:,.0f}):\n"
-        f"  Shares: {shares} | Position: £{pos_val:,.0f} ({pos_pct:.1f}%)\n"
-        f"  Max loss: £{risk_gbp:,.0f}\n"
+        f"  Shares: {shares} | £{pos_val_gbp:,.0f} / ${pos_val_usd:,.0f} ({pos_pct:.1f}%)\n"
+        f"  Max loss: £{risk_gbp:,.0f} / ${risk_usd:,.0f}\n"
     )
+
+    if fx_warning_flag:
+        msg += "  ⚠️ FX fallback rate — verify size manually\n"
 
     if earnings_warning:
         msg += f"\n{earnings_warning}\n"
@@ -172,7 +179,12 @@ def format_morning_briefing(
     weak_str = ", ".join(weak_sectors[:2]) if weak_sectors else "None"
     near_pivot_str = ", ".join(f"${t}" for t in near_pivot[:3]) if near_pivot else "None"
     blocked_str = ", ".join(f"${t}" for t in earnings_blocked[:3]) if earnings_blocked else "None"
-    events_str = ", ".join(economic_events[:2]) if economic_events else "None today ✅"
+    events_str = (
+        ", ".join(
+            (e.get("event", str(e)) if isinstance(e, dict) else str(e))
+            for e in economic_events[:2]
+        ) if economic_events else "None today ✅"
+    )
 
     return (
         f"📋 MORNING BRIEFING — {today}\n"

@@ -186,11 +186,68 @@ def db_session():
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Forward-only column migrations
+# ---------------------------------------------------------------------------
+# SQLite does not support ALTER TABLE ADD COLUMN IF NOT EXISTS, so we query
+# PRAGMA table_info() first and only issue ALTER TABLE for missing columns.
+# Add new columns here whenever the schema grows; never remove old entries.
+# ---------------------------------------------------------------------------
+_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "watchlist": [
+        ("grade",               "TEXT"),
+        ("entry_price",         "REAL"),
+        ("stop_price",          "REAL"),
+        ("stop_pct",            "REAL"),
+        ("target_1",            "REAL"),
+        ("target_2",            "REAL"),
+        ("base_days",           "INTEGER"),
+        ("rs_line_new_high",    "INTEGER DEFAULT 0"),
+        ("eps_growth",          "REAL"),
+        ("rev_growth",          "REAL"),
+        ("fundamentals_score",  "INTEGER"),
+        ("earnings_date",       "TEXT"),
+        ("ai_notes",            "TEXT"),
+        ("breakout_confirmed",  "INTEGER DEFAULT 0"),
+    ],
+    "signals": [
+        ("ai_catalyst",         "TEXT"),
+        ("ai_earnings_quality", "TEXT"),
+        ("ai_sentiment",        "TEXT"),
+        ("aggression_factor",   "REAL"),
+    ],
+}
+
+
+def _ensure_columns() -> None:
+    """
+    Add any missing columns to existing tables (forward-only schema migration).
+
+    Safe to run on every startup — reads PRAGMA table_info to determine which
+    columns already exist and only issues ALTER TABLE for the absent ones.
+    New tables created by _SCHEMA will already have all columns, so this is
+    a no-op for fresh installs.
+    """
+    with db_session() as conn:
+        for table, columns in _MIGRATIONS.items():
+            existing = {
+                row[1]
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for col_name, col_def in columns:
+                if col_name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"
+                    )
+                    logger.info("Migration: added column %s.%s (%s)", table, col_name, col_def)
+
+
 def init_db() -> None:
     """Create all tables and indexes. Safe to call on every startup."""
     logger.info("Initialising database at %s", DB_PATH)
     with db_session() as conn:
         conn.executescript(_SCHEMA)
+    _ensure_columns()
     logger.info("Database ready")
 
 
