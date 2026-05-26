@@ -469,6 +469,13 @@ Complete chronological list across all sessions. See Section 4 for details per s
 - **Zero trades:** `vcp["alert"]` calibrated for real-time scanning — requires breakout confirmed on exactly the last bar of the historical slice (almost never true). Fixed: use `watchlist_candidate` (score≥70) + manual `current_close > pivot * 1.001` check.
 - **Equity curve crash (duplicate dates):** `pd.concat(all_test_equity)` creates duplicate DatetimeIndex at walk-forward window boundaries; `spy_scaled[date_idx]` returns a Series for duplicate dates; `float(Series)` raises TypeError. Fixed: deduplicate `combined_equity` before any lookups; use `reindex(method="ffill")` for SPY benchmark; guard `isinstance(pd.Series)` in equity records loop.
 
+**Backtest still 0 trades + Sortino blow-up (Session 13):**
+- **Mathematically impossible breakout (0 trades — root cause):** `pivot_price = max(High[-PIVOT_ZONE_DAYS:])` INCLUDES today's bar. Since `close ≤ high` is always true in OHLCV data, `current_close > pivot_price * 1.001` is mathematically impossible — guaranteed 0 trades on every run. Fixed: compute `prior_resistance = max(High[-lookback-1:-1])` using bars BEFORE today.
+- **Sortino = -387248889821539056:** With flat equity (0 trades), all excess returns equal `-0.05/252` (constant). `downside.std()` should be 0.0 but is `~8e-21` due to floating-point; dividing `-0.0002 / 8e-21 * sqrt(252)` produces the enormous negative. Fixed: treat `downside_std < 1e-10` as zero → return 0.0. Same guard added to `compute_sharpe`.
+- **Dashboard misleading Distribution Days message:** Showed "all buy signals suppressed" unconditionally when dist_days ≥ danger threshold, even when SPY is above SMA200 (where signals are still allowed at 25% size). Fixed: check `signals_allowed` and `spy_above_sma200` from regime dict.
+- **Dashboard wrong description:** Said "uses vectorbt" — backtest is pure pandas/numpy. Fixed.
+- **Added per-window diagnostic logging:** `"Window X→Y | days=N | tt_pass=M | vcp_wc=K | breakout=J | entries=I"` — visible in sepa.log and dashboard full-log download.
+
 **Backtest crash + correctness fixes (Session 10):**
 - **Backtest crash (root cause):** `fetch_ohlcv_batch()` did not strip timezone from `yf.download()` bulk results. yfinance 0.2.x+ returns a tz-aware UTC index; the single-ticker path (`_fetch_yfinance`) already strips tz via `tz_localize(None)`. When `_run_single_window` sliced `df.loc[:current_date]` with a tz-naive timestamp from `spy_period.index` against a tz-aware ticker DataFrame → `TypeError: Cannot compare tz-naive and tz-aware datetime-like objects`. Fix: normalise tz in `fetch_ohlcv_batch` for every extracted ticker.
 - **Exit equity formula wrong:** `equity += shares * (exit_price - entry)` adds only P&L but entry cost was already deducted at open — double-subtracts entry, depleting equity at 2× the correct rate every stop-loss. Fix: `equity += shares * exit_price` (add back full exit proceeds).
@@ -481,13 +488,14 @@ Complete chronological list across all sessions. See Section 4 for details per s
 
 **Latest commits (newest first):**
 ```
+5f200ef  Fix backtest: impossible breakout condition + Sortino float blow-up
+938c33c  Fix misleading distribution days message in dashboard
+ea25622  Update HANDOFF.md: Session 12 log
 fcee422  Fix backtest: deduplicate equity index + generate trades with watchlist_candidate
 8d92cd2  Update HANDOFF.md: Session 11 log
 bc76c9e  Eleventh review: backtest diagnostics + defensive timezone handling
-5e76378  Update HANDOFF.md: Session 10 log + backtest fixes documented
 a75f796  Tenth review: fix backtest crash + 3 correctness bugs
 ada91be  Ninth review: 7 bug fixes — weighted RS, circuit breaker P&L, stop persistence
-36c8a74  Seventh review: 13 bug fixes + 50/50 tests passing
 ```
 
 **What is working:**
@@ -515,9 +523,10 @@ ada91be  Ninth review: 7 bug fixes — weighted RS, circuit breaker P&L, stop pe
 
 **What is still pending:**
 - Set `VPS_IP` in Hostinger Docker Manager
-- Pull new Docker image on VPS and restart container (commit `fcee422` pushed — CI running)
+- Pull new Docker image on VPS and restart container (commit `5f200ef` pushed — CI running)
 - Run test scan on VPS to verify signal generation with MIN_BASE_TRADING_DAYS=15
-- Run backtest from dashboard to verify it generates non-zero trades and CAGR
+- Run backtest from dashboard to verify it now generates actual trades and non-zero CAGR
+- Review diagnostic log lines after backtest: `"Window X→Y | tt_pass=M | vcp_wc=K | breakout=J"` — if breakout=0, VCP scoring may need recalibration for historical data
 
 ---
 
@@ -1077,6 +1086,52 @@ Track each work session here. Add a new entry at the start of every new Claude C
 1. Wait for CI to complete (check GitHub Actions)
 2. Pull new Docker image in Hostinger → restart container
 3. Run backtest again — should now generate actual trades and produce non-zero CAGR
+
+---
+
+### Session 13 — Thirteenth Review: Backtest still 0 trades + Sortino blow-up
+**Date:** 26 May 2026 (continuation after Session 12)
+**Trigger:** User attached screenshot showing backtest results: Total Trades=0, Sortino=-387248889821539056.00.
+
+**Root causes diagnosed:**
+
+1. **Mathematically impossible breakout condition** — the actual root cause of 0 trades in EVERY previous run:
+   - `pivot_price = float(pivot_zone["High"].max())` where `pivot_zone = base_df.iloc[-15:]` INCLUDES today's bar
+   - In OHLCV data, `close ≤ high` is always true. Today's high is in the max calculation.
+   - Therefore `current_close > pivot_price * 1.001` is mathematically impossible (would require close > own high)
+   - This made the backtest produce 0 trades regardless of how many VCP patterns were found
+   - **Fix:** `prior_resistance = max(High[-lookback-1 : -1])` — uses bars BEFORE today; close can genuinely exceed prior-day resistance
+
+2. **Sortino = -387,248,889,821,539,056** — floating-point near-zero divide:
+   - With flat equity, all excess returns equal `-0.05/252` exactly. `downside.std()` should be 0.0 but is `~8e-21` due to IEEE 754 floating-point representation
+   - `-0.0002 / 8e-21 * sqrt(252)` → that enormous negative number
+   - **Fix:** treat `downside_std < 1e-10` as zero → return 0.0. Same guard added to `compute_sharpe`
+
+3. **Distribution days dashboard message was wrong** (fixed same session):
+   - Showed "🚫 all buy signals suppressed" unconditionally at danger threshold, even when SPY is above SMA200 (code allows signals at 25% size)
+   - Fixed to show "⚠️ signals at quarter size (25%)" vs "⛔ signals suppressed" based on `signals_allowed` + `spy_above_sma200`
+
+4. **Added per-window diagnostic logging:**
+   - `"Window X→Y | days=N | tt_pass=M | vcp_wc=K | breakout=J | entries=I | trades=T"`
+   - Shows exactly where tickers are being filtered out; visible in sepa.log
+
+**Fixes applied:**
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | `backtesting/backtest.py` | `current_close > pivot_price * 1.001` always false — pivot includes today's high | Replaced with `prior_resistance = max(High[-lookback-1:-1])` (prior bars only) |
+| 2 | `backtesting/metrics.py` | Sortino/Sharpe blow-up when `downside.std()` ≈ 8e-21 (not exactly 0) | Added `< 1e-10` guard instead of `== 0` |
+| 3 | `dashboard.py` | Distribution days panel always showed "suppressed" at danger threshold | Checks `signals_allowed` + `spy_above_sma200` for correct message |
+| 4 | `dashboard.py` | Said "uses vectorbt" — wrong (pure pandas/numpy) | Fixed description |
+| 5 | `backtesting/backtest.py` | No visibility into which filter eliminates trades | Added per-window diagnostic counter log |
+
+**Test result: 50/50 passing (2.13s)**
+**Key commits:** `938c33c` (dashboard), `5f200ef` (backtest + metrics, pushed)
+
+**Next step for user:**
+1. Wait for CI (2-3 min), pull new Docker image, restart container
+2. Run backtest — should now generate actual trades and real CAGR/Sharpe/Sortino
+3. After backtest completes, download the full log (System Status page) and look for the per-window diagnostic lines to confirm signals are flowing
 
 ---
 
