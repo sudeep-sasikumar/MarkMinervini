@@ -318,10 +318,21 @@ if page == "🏠 Live Dashboard":
         )
         st.progress(_dist_pct)
         if dist_days >= settings.DISTRIBUTION_DAYS_DANGER:
-            st.error(
-                f"⛔ Danger threshold reached — all buy signals suppressed until "
-                f"count drops below {settings.DISTRIBUTION_DAYS_DANGER}"
-            )
+            _signals_allowed = regime_data.get("signals_allowed", True)
+            if not _signals_allowed or not spy_above:
+                # SPY below SMA200 (or data unavailable): full suppression
+                st.error(
+                    f"⛔ Danger threshold reached + SPY below SMA200 — "
+                    f"all buy signals suppressed until count drops below "
+                    f"{settings.DISTRIBUTION_DAYS_DANGER}"
+                )
+            else:
+                # SPY above SMA200: signals still allowed, position size at 25%
+                st.warning(
+                    f"⚠️ Danger threshold reached but SPY above SMA200 — "
+                    f"signals allowed at **quarter size (25%)** until count drops below "
+                    f"{settings.DISTRIBUTION_DAYS_DANGER}"
+                )
         elif dist_days >= settings.DISTRIBUTION_DAYS_CAUTION:
             st.warning(
                 f"⚠️ Caution zone — position sizes reduced to 50% "
