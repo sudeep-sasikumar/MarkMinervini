@@ -137,6 +137,9 @@ def _build_fundamentals(ticker: str) -> dict:
     }
 
     # --- Finnhub key metrics ---
+    # /stock/metric returns pre-computed growth rates on the free tier.
+    # We pull quarterly YoY growth directly from here (more reliable than
+    # parsing financials-reported whose field label matching is fragile).
     metrics_data = _finnhub_get("/stock/metric", {"symbol": ticker, "metric": "all"})
     if metrics_data and "metric" in metrics_data:
         m = metrics_data["metric"]
@@ -147,7 +150,42 @@ def _build_fundamentals(ticker: str) -> dict:
         base["institutional_own_pct"] = m.get("institutionalOwnershipPercentage")
         base["status"] = "partial"
 
+        # --- Primary source for quarterly growth: metric endpoint fields ---
+        # Finnhub returns these as ratios (e.g. 0.25 = 25%).  Convert to %.
+        # Field name variants observed across Finnhub API versions:
+        #   epsGrowthQuarterlyYOY / epsGrowthQuarterlyYoy / epsGrowthTTMYoy
+        for _eps_field in ("epsGrowthQuarterlyYOY", "epsGrowthQuarterlyYoy", "epsGrowthTTMYoy"):
+            _v = m.get(_eps_field)
+            if _v is not None:
+                base["eps_growth_yoy"] = round(float(_v) * 100, 1)
+                break
+
+        for _rev_field in ("revenueGrowthQuarterlyYOY", "revenueGrowthQuarterlyYoy",
+                           "revenueGrowthTTMYoy", "revenueGrowth3Y"):
+            _v = m.get(_rev_field)
+            if _v is not None:
+                base["rev_growth_yoy"] = round(float(_v) * 100, 1)
+                break
+
+        # Prior-year gross margin for contraction check.
+        # Prefer explicit annual comparison if available.
+        for _gm_field in ("grossMarginAnnual", "grossMargin5Y"):
+            _v = m.get(_gm_field)
+            if _v is not None:
+                base["gross_margin_prior"] = float(_v)
+                break
+
+        if base["eps_growth_yoy"] is not None:
+            logger.debug(
+                "Fundamentals %s: metric-endpoint EPS growth=%.1f%% rev_growth=%.1f%%",
+                ticker,
+                base["eps_growth_yoy"],
+                base["rev_growth_yoy"] if base["rev_growth_yoy"] is not None else 0.0,
+            )
+
     # --- Finnhub reported financials for quarterly EPS/rev growth ---
+    # This provides more precise YoY comparisons but requires label matching.
+    # Only overrides the metric-endpoint values if it produces non-None results.
     fins = _finnhub_get("/stock/financials-reported",
                         {"symbol": ticker, "freq": "quarterly"})
     if fins and fins.get("data"):

@@ -79,18 +79,21 @@ def apply_fundamentals_filter(ticker: str) -> dict:
         return result
 
     # --- Hard gate 3: Expanding gross margin ---
-    # Missing margin data is treated as a FAILURE (conservative gate).
-    # A stock should not pass simply because we have no margin data.
+    # Only hard-fail if we have BOTH current and prior margin AND current is lower.
+    # If prior margin is unavailable (common on free API tiers), allow through with
+    # a warning — we do not penalise a stock for our data gap.
     gm_now = data.get("gross_margin_current")
     gm_prior = data.get("gross_margin_prior")
-    if gm_now is None or gm_prior is None:
-        result["rejection_reason"] = "Gross margin data unavailable — cannot verify non-contraction"
-        return result
-    if gm_now < gm_prior:
-        result["rejection_reason"] = (
-            f"Gross margin contracting: {gm_now:.1f}% vs {gm_prior:.1f}% prior year"
-        )
-        return result
+    if gm_now is not None and gm_prior is not None:
+        if gm_now < gm_prior:
+            result["rejection_reason"] = (
+                f"Gross margin contracting: {gm_now:.1f}% vs {gm_prior:.1f}% prior year"
+            )
+            return result
+    elif gm_now is None:
+        # No margin data at all — pass with note (better than blocking everything)
+        logger.debug("Fundamentals %s: no gross margin data — passing through", ticker)
+    # gm_prior is None but gm_now is set: can't compare, treat as indeterminate → pass
 
     result["passes"] = True
     return result
