@@ -216,9 +216,14 @@ def detect_vcp(
             base_result["steps"] = steps
             return base_result
 
+    # Scoring: Minervini validates 2-contraction VCPs ("W" base) as legitimate setups.
+    # Give base credit for 2, with bonuses for tighter 3- and 4-contraction setups.
+    if len(contractions) >= 2:
+        score += 15   # 2 contractions: base credit (was 0 — prevented watchlist entry)
     if len(contractions) >= 3:
-        score += 25
-    score += 10 if len(contractions) >= 4 else 0
+        score += 10   # 3 contractions: total +25
+    if len(contractions) >= 4:
+        score += 10   # 4 contractions: total +35
     steps["step5_valid"] = True
 
     # ------------------------------------------------------------------

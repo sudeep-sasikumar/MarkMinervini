@@ -127,12 +127,47 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         from screening.fundamentals_filter import apply_fundamentals_filter
 
         fundamentals_passed = []
+        _fund_rejection_sample: dict[str, int] = {}  # reason → count
         for ticker, df, tt, rs in trend_passed:
             fund = apply_fundamentals_filter(ticker)
             if fund["passes"]:
                 fundamentals_passed.append((ticker, df, tt, rs, fund))
+            else:
+                reason = fund.get("rejection_reason", "unknown")
+                # Bucket by first 60 chars so similar reasons group together
+                key = reason[:60]
+                _fund_rejection_sample[key] = _fund_rejection_sample.get(key, 0) + 1
 
         logger.info("Fundamentals: %d/%d passed", len(fundamentals_passed), len(trend_passed))
+
+        # If every single stock failed fundamentals, that is almost certainly an API
+        # key configuration problem rather than genuinely bad fundamentals — alert loudly.
+        if len(fundamentals_passed) == 0 and len(trend_passed) > 0:
+            logger.warning(
+                "FUNDAMENTALS BOTTLENECK: 0/%d stocks passed. This typically means "
+                "FINNHUB_API_KEY and ALPHA_VANTAGE_KEY are not set in your environment. "
+                "Top rejection reasons: %s. "
+                "Set REQUIRE_FUNDAMENTALS=false in your environment to bypass this gate "
+                "and scan with Trend Template + VCP only.",
+                len(trend_passed),
+                dict(list(_fund_rejection_sample.items())[:3]),
+            )
+            # Bypass mode: if the env variable REQUIRE_FUNDAMENTALS is set to "false",
+            # allow all trend_passed stocks through with a dummy fundamentals dict.
+            if os.getenv("REQUIRE_FUNDAMENTALS", "true").lower() == "false":
+                logger.warning(
+                    "REQUIRE_FUNDAMENTALS=false: bypassing fundamentals filter, "
+                    "scanning %d trend-template-passed stocks with VCP only.",
+                    len(trend_passed),
+                )
+                _dummy_fund = {
+                    "passes": True, "fundamentals_score": 0,
+                    "status": "bypassed", "eps_growth_yoy": None,
+                    "rev_growth_yoy": None, "gross_margin_current": None,
+                    "gross_margin_prior": None, "roe": None, "details": {},
+                    "rejection_reason": None,
+                }
+                fundamentals_passed = [(t, d, tt, rs, _dummy_fund) for t, d, tt, rs in trend_passed]
 
         # --- Step 6: Sector stage2 check + VCP ---
         from patterns.vcp_detector import detect_vcp

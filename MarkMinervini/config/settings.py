@@ -38,7 +38,7 @@ MAX_BASE_TRADING_DAYS = 120     # look-back window for base detection
 # not the minimum duration. 60 was incorrectly used as the minimum in Session 5.
 MIN_BASE_TRADING_DAYS = 15      # 3 weeks minimum (was wrongly 60)
 POCKET_PIVOT_BONUS = 5          # VCP score bonus if pocket pivot confirmed in last 5 days
-CONTRACTION_TIGHTENING_RATIO = 0.85  # each contraction must be < prev * 0.85
+CONTRACTION_TIGHTENING_RATIO = 0.90  # each contraction must be < prev * 0.90 (10% tighter minimum)
 MIN_CONTRACTIONS = 2
 PIVOT_ZONE_DAYS = 15            # last N days define the pivot zone
 PIVOT_ATR_TIGHT_RATIO = 0.35    # ATR-14 / ATR-50 < this = tight (Score +25)

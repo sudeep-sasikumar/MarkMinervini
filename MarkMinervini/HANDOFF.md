@@ -876,8 +876,9 @@ Job 2: build-and-push (needs: lint-and-test)
 
 | Priority | Item |
 |---|---|
-| MEDIUM | **Verify VCP calibration** — with `MIN_BASE_TRADING_DAYS=15`, more setups will qualify. Run a test scan to verify signal volume is sensible (not too many false positives) |
-| MEDIUM | **Verify weighted RS impact** — RS ratings will shift when `ada91be` is deployed; stocks that recently surged will rank higher. Compare top-20 RS list before/after |
+| MEDIUM | **Configure Finnhub/Alpha Vantage API keys** in Hostinger Docker environment — without them, all fundamentals fail (status="unknown") and live scan produces 0 signals. Set `REQUIRE_FUNDAMENTALS=false` to bypass until keys are obtained. |
+| MEDIUM | **`fetch_intraday_ohlcv` ImportError in deployed container** — fires every 15 min during market hours. Function IS in local git at `a75f796` but container may be running stale image. Pull latest image to fix. |
+| MEDIUM | **Verify VCP calibration after Session 14 scoring fix** — 2-contraction setups now score 15 pts (was 0); run a backtest and confirm it generates trades before tightening thresholds |
 | MEDIUM | **`data/fetcher.py`** — No central Finnhub rate limiter. Only `fundamentals.py` has one now. If other modules call Finnhub directly they bypass it |
 | MEDIUM | **Run `python main.py --test-mode`** on VPS to confirm full pipeline end-to-end produces at least one watchlist candidate from live market data |
 | MEDIUM | **Paper trading phase** — system is built but never paper-traded. Run for 2–4 weeks to validate that stocks reaching score≥80 are genuinely setting up for breakouts |
@@ -889,7 +890,6 @@ Job 2: build-and-push (needs: lint-and-test)
 | LOW | Add `pandas_market_calendars` or `exchange_calendars` for US holiday detection (current fix only covers weekends, not Memorial Day, Thanksgiving, etc.) |
 | LOW | Add regime-transition Telegram alerts ("BULL → NEUTRAL", "NEUTRAL → BEAR") so changes are visible without checking the dashboard |
 | LOW | `dashboard.py` System Status page — show next scheduled job fire times (APScheduler `scheduler.get_jobs()` returns next fire time) |
-| LOW | `backtesting/backtest.py` — walk-forward backtest built but never actually run against live VCP parameters to validate score≥80 threshold |
 | LOW | Weekly job (`job_weekly`) calls `analyse_management_quality()` but this is Ollama LLM — verify it doesn't time out when Ollama is offline |
 | LOW | Add tests for: weighted RS formula correctness, pocket_pivot shift(1) fix, stop_manager DB persistence |
 
@@ -1132,6 +1132,59 @@ Track each work session here. Add a new entry at the start of every new Claude C
 1. Wait for CI (2-3 min), pull new Docker image, restart container
 2. Run backtest — should now generate actual trades and real CAGR/Sharpe/Sortino
 3. After backtest completes, download the full log (System Status page) and look for the per-window diagnostic lines to confirm signals are flowing
+
+---
+
+### Session 14 — Fourteenth Review: VCP scoring bottleneck + Fundamentals API failure
+**Date:** 26 May 2026 (continued after context reset)
+**Trigger:** Backtest still showing 0 trades despite Session 13 prior_resistance fix. Live scan "Fundamentals: 0/17 passed" blocking all live candidates.
+
+**Root causes diagnosed:**
+
+1. **VCP scoring dead zone for 2-contraction setups** — the most critical backtest bottleneck:
+   - S&P 500 large-caps often form 2-contraction bases (the classic "W" base), which Minervini validates as legitimate VCP setups
+   - Previous scoring: `if len(contractions) >= 3: score += 25` — 2-contraction setups scored 0 pts on Step 5
+   - Maximum possible score with 2 contractions: 0 (step5) + 25 (vol) + 35 (atr) = 60 → below 70 watchlist threshold
+   - **This made all 2-contraction VCPs impossible to trade regardless of setup quality**
+   - **Fix:** Give credit for 2 contractions: +15 for ≥2, +10 for ≥3 (total 25), +10 for ≥4 (total 35)
+
+2. **CONTRACTION_TIGHTENING_RATIO = 0.85 too strict for large-caps**:
+   - Hard fail if each contraction isn't 15% shallower than previous
+   - S&P 500 large-caps regularly form valid VCPs with 8–12% tightening per step
+   - Caused many real bases to fail the tightening check before reaching scoring
+   - **Fix:** Relaxed to 0.90 (10% minimum tightening per contraction)
+
+3. **No per-ticker rejection reason visibility**:
+   - Backtest diagnostic only logged totals (`vcp_wc=0`); couldn't see WHY each ticker failed VCP
+   - **Fix:** Sample first 8 unique VCP rejection reasons per window; print to stdout (captured by dashboard)
+
+4. **Fundamentals: 0/17 passed — API key not configured**:
+   - When `FINNHUB_API_KEY = ""`, `_finnhub_get` returns `None` immediately → `status = "unknown"` → all stocks rejected
+   - This is normal when the API key hasn't been set in the Docker environment
+   - **Fix:** Added loud WARNING with guidance when 0/N fundamentals pass. Added `REQUIRE_FUNDAMENTALS=false` env bypass: when set, stocks that pass Trend Template go directly to VCP without fundamentals check.
+
+**Fixes applied:**
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | `config/settings.py` | `CONTRACTION_TIGHTENING_RATIO = 0.85` too strict for S&P 500 | Changed to 0.90 (10% tightening minimum) |
+| 2 | `patterns/vcp_detector.py` | 2-contraction VCPs scored 0 pts → can never reach watchlist threshold | +15 for ≥2 contractions, +10 for ≥3 (total 25), +10 for ≥4 (total 35) |
+| 3 | `backtesting/backtest.py` | No visibility into per-ticker VCP rejection reasons | Sample first 8 unique rejection reasons per window; print to stdout |
+| 4 | `backtesting/backtest.py` | Diagnostic totals only; no rejection detail | Added `_rejection_samples` list and `_rejection_seen` deduplication |
+| 5 | `main.py` | Fundamentals 0/N passes logged at INFO but no guidance | Added WARNING with suggestion to set `REQUIRE_FUNDAMENTALS=false`; added bypass mode |
+
+**Impact on scoring paths (after fixes):**
+- 2-contraction VCP + vol all declining + ATR very tight: 15+25+35 = 75 → watchlist ✓
+- 2-contraction + pocket pivot bonus: 75+5 = 80 → alert ✓
+- 3-contraction + vol all + ATR very tight: 25+25+35 = 85 → alert ✓ (unchanged)
+
+**Test result: 50/50 passing**
+
+**Next steps for user:**
+1. Pull new Docker image after CI completes → restart container
+2. Set `REQUIRE_FUNDAMENTALS=false` in Hostinger Docker environment variables to unblock live scan
+3. Run backtest — should now see non-zero `vcp_wc` and `breakout` counts in diagnostic output
+4. If backtest still shows 0 trades, check dashboard stdout panel for per-ticker rejection reasons
 
 ---
 

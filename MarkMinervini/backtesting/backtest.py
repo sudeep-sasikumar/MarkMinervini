@@ -251,6 +251,10 @@ def _run_single_window(
     _diag = {
         "days": 0, "tt_pass": 0, "vcp_wc": 0, "breakout": 0, "entries": 0,
     }
+    # Rejection reason sampling — first 8 unique VCP rejections per window
+    # Printed to stdout so the dashboard subprocess captures them (stderr = logs).
+    _rejection_samples: list[str] = []
+    _rejection_seen: set[str] = set()
 
     for current_date in spy_period.index:
         # ---------------------------------------------------------------
@@ -360,6 +364,15 @@ def _run_single_window(
             # prior resistance is detectable.
             vcp = detect_vcp(ticker, avail, trend_template_passes=True)
             if not vcp.get("watchlist_candidate", False):
+                # Sample unique rejection reasons (printed to stdout for dashboard visibility)
+                reason = vcp.get("rejection_reason") or f"score={vcp.get('vcp_score',0)} < 70"
+                # Bucket by first ~50 chars so similar reasons aren't all sampled
+                key = reason[:50]
+                if key not in _rejection_seen and len(_rejection_samples) < 8:
+                    _rejection_seen.add(key)
+                    _rejection_samples.append(
+                        f"  {ticker} ({str(current_date.date())}): {reason}"
+                    )
                 continue
             _diag["vcp_wc"] += 1
 
@@ -418,6 +431,19 @@ def _run_single_window(
         _diag["days"], _diag["tt_pass"], _diag["vcp_wc"], _diag["breakout"],
         _diag["entries"], len(trade_returns),
     )
+    # Print rejection samples to STDOUT (captured separately by dashboard subprocess)
+    # so they appear in the "Full error + traceback" panel even on success.
+    print(
+        f"\n[DIAG] Window {start.date()}→{end.date()} "
+        f"days={_diag['days']} tt_pass={_diag['tt_pass']} "
+        f"vcp_wc={_diag['vcp_wc']} breakout={_diag['breakout']} "
+        f"entries={_diag['entries']} trades={len(trade_returns)}",
+        flush=True,
+    )
+    if _rejection_samples:
+        print("[DIAG] Sample VCP rejection reasons:", flush=True)
+        for r in _rejection_samples:
+            print(r, flush=True)
 
     if not equity_series:
         return None, []
