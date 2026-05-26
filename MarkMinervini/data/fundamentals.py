@@ -176,11 +176,24 @@ def _build_fundamentals(ticker: str) -> dict:
                 break
 
         if base["eps_growth_yoy"] is not None:
-            logger.debug(
-                "Fundamentals %s: metric-endpoint EPS growth=%.1f%% rev_growth=%.1f%%",
+            logger.info(
+                "Fundamentals %s: metric EPS=%+.1f%% rev=%s",
                 ticker,
                 base["eps_growth_yoy"],
-                base["rev_growth_yoy"] if base["rev_growth_yoy"] is not None else 0.0,
+                f"{base['rev_growth_yoy']:+.1f}%" if base["rev_growth_yoy"] is not None else "n/a",
+            )
+        else:
+            # Diagnostic: log ALL growth-related keys from the metric response so we
+            # can identify the correct field name if it differs across API versions.
+            _growth_keys = {
+                k: v for k, v in m.items()
+                if any(kw in k.lower() for kw in ("growth", "eps", "rev", "earn"))
+                and v is not None
+            }
+            logger.info(
+                "Fundamentals %s: no quarterly EPS growth in metric endpoint. "
+                "Available growth fields: %s",
+                ticker, _growth_keys or "NONE",
             )
 
     # --- Finnhub reported financials for quarterly EPS/rev growth ---
@@ -199,6 +212,19 @@ def _build_fundamentals(ticker: str) -> dict:
             ticker,
         )
         _alpha_vantage_fallback(ticker, base)
+
+    # --- Last-resort fallback: use 5-year annual EPS growth as quarterly proxy ---
+    # Finnhub free tier often omits per-quarter YoY fields; epsGrowth5Y is reliably
+    # present. A stock with strong multi-year EPS growth is still fundamentally sound.
+    # Marks the data as "proxy" via status to allow downstream review.
+    if base["eps_growth_yoy"] is None and base["eps_growth_annual"] is not None:
+        logger.info(
+            "Fundamentals %s: quarterly EPS YoY unavailable — using 5Y annual EPS growth "
+            "(%.1f%%) as proxy for eps_growth_yoy",
+            ticker, base["eps_growth_annual"],
+        )
+        base["eps_growth_yoy"] = base["eps_growth_annual"]
+        base["status"] = "partial"   # flag so dashboard can show proxy caveat
 
     # --- Compute hard gates ---
     eps_ok = (base["eps_growth_yoy"] is not None and

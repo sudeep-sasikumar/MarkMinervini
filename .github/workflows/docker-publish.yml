@@ -1,11 +1,13 @@
-﻿name: CI — Test + Build + Push Docker Image
+﻿name: CI -- Test + Build + Push Docker Image
 
 # On every push to main that touches MarkMinervini code:
-#   1. Run unit tests (reports failures but does NOT block Docker push)
+#   1. Run unit tests (informational -- does NOT block Docker push)
 #   2. Build multi-arch Docker image and push to ghcr.io
 #
 # After CI completes (~4-6 min):
-#   Hostinger Docker Manager → pull latest image → restart container
+#   Hostinger Docker Manager: pull latest image, restart container.
+#   Confirm deployment: check "Build Info" panel on System Status page --
+#   the GIT_COMMIT and BUILD_DATE must match the current GitHub commit.
 
 on:
   push:
@@ -17,7 +19,7 @@ on:
 
 jobs:
   # -----------------------------------------------------------------------
-  # Job 1: unit tests  (informational — does NOT block the Docker build)
+  # Job 1: unit tests  (informational -- does NOT block the Docker build)
   # -----------------------------------------------------------------------
   test:
     runs-on: ubuntu-latest
@@ -38,12 +40,11 @@ jobs:
         run: pytest MarkMinervini/tests/ -v --tb=short
 
   # -----------------------------------------------------------------------
-  # Job 2: build and push Docker image (runs even if tests fail)
+  # Job 2: build and push Docker image (runs regardless of test outcome)
   # -----------------------------------------------------------------------
   build-and-push:
     runs-on: ubuntu-latest
-    # Removed "needs: test" so Docker push is never blocked by test failures.
-    # Test failures are visible in the Actions tab as a warning.
+    # No "needs: test" -- Docker push never blocked by test failures.
 
     permissions:
       contents: read
@@ -51,6 +52,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Get build timestamp (UTC)
+        id: date
+        run: echo "date=$(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -72,6 +77,9 @@ jobs:
             ghcr.io/sudeep-sasikumar/markminervini:latest
             ghcr.io/sudeep-sasikumar/markminervini:${{ github.sha }}
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.date.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

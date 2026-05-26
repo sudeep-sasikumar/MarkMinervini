@@ -698,7 +698,13 @@ def main():
                         help="Run one scan, send one Telegram message, then exit")
     args = parser.parse_args()
 
-    logger.info("Starting Minervini SEPA System v3.0")
+    _git_commit = os.getenv("GIT_COMMIT", "dev")
+    _build_date = os.getenv("BUILD_DATE", "local build")
+    logger.info(
+        "Starting Minervini SEPA System v3.0 | commit=%s | built=%s",
+        _git_commit[:8] if len(_git_commit) > 8 else _git_commit,
+        _build_date,
+    )
     logger.info("DB: %s | Log: %s", settings.DB_PATH, LOG_PATH)
 
     # Initialise database

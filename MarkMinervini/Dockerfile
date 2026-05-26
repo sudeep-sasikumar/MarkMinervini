@@ -1,5 +1,13 @@
 FROM python:3.11-slim
 
+# Build-time metadata — injected by GitHub Actions CI.
+# Visible as environment variables inside the container and on the dashboard.
+# If missing (local build), defaults to "dev".
+ARG GIT_COMMIT=dev
+ARG BUILD_DATE=unknown
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV BUILD_DATE=$BUILD_DATE
+
 WORKDIR /app
 
 # System dependencies

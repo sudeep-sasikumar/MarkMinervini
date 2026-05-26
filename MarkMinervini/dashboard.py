@@ -752,6 +752,33 @@ elif page == "💼 Trade Journal":
 elif page == "⚙️ System Status":
     st.title("⚙️ System Status")
 
+    # ------------------------------------------------------------------
+    # Build / deployment info — change between deploys confirms new image
+    # ------------------------------------------------------------------
+    _git_commit = os.getenv("GIT_COMMIT", "dev")
+    _build_date = os.getenv("BUILD_DATE", "local build")
+    _short_hash = _git_commit[:8] if len(_git_commit) > 8 else _git_commit
+    _is_dev = (_git_commit == "dev")
+
+    if _is_dev:
+        st.warning(
+            "⚠️ **Running local/dev build** — no GIT_COMMIT env var set. "
+            "If this is the VPS container, the image was NOT built by CI. "
+            "Re-pull the image from ghcr.io after CI completes."
+        )
+    else:
+        st.success(
+            f"✅ **Deployed image:** commit `{_short_hash}` — built {_build_date}  "
+            f"([view on GitHub](https://github.com/sudeep-sasikumar/MarkMinervini/commit/{_git_commit}))"
+        )
+
+    st.caption(
+        f"Full commit hash: `{_git_commit}` | "
+        "After a git push, wait for CI (~4–6 min), then **pull + restart** in Hostinger. "
+        "This badge must change — if it shows 'dev' or the same old hash, the old image is still running."
+    )
+    st.divider()
+
     # API health
     st.subheader("API Health")
     col1, col2, col3, col4 = st.columns(4)
@@ -786,7 +813,7 @@ elif page == "⚙️ System Status":
     with col4:
         from market_intelligence.ai_analyst import is_ai_online
         ai = is_ai_online()
-        st.metric("Ollama AI", "✅ OK" if ai else "❌ Offline")
+        st.metric("Ollama AI", "✅ OK" if ai else "⚠️ Offline")
 
     st.divider()
 
