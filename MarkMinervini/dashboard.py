@@ -866,7 +866,7 @@ elif page == "📊 Backtest Results":
     st.title("📊 Backtest Results")
 
     st.info(
-        "Backtesting uses vectorbt with walk-forward validation. "
+        "Custom walk-forward backtest (pure pandas/numpy, no external backtesting library). "
         f"Period: {settings.BACKTEST_START} → {settings.BACKTEST_END}. "
         "Commission: £0. Slippage: 0.2%."
     )

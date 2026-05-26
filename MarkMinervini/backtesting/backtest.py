@@ -247,6 +247,11 @@ def _run_single_window(
     # Step through each trading day in the test window
     spy_period = spy_df.loc[start:end]
 
+    # Diagnostic counters — logged once at end of window to diagnose filter bottlenecks
+    _diag = {
+        "days": 0, "tt_pass": 0, "vcp_wc": 0, "breakout": 0, "entries": 0,
+    }
+
     for current_date in spy_period.index:
         # ---------------------------------------------------------------
         # 1. Process exits for open positions
@@ -329,6 +334,7 @@ def _run_single_window(
         # ---------------------------------------------------------------
         # 4. Screen each ticker for a new entry signal
         # ---------------------------------------------------------------
+        _diag["days"] += 1
         for ticker, df in period_data.items():
             if ticker in open_positions:
                 continue
@@ -340,23 +346,32 @@ def _run_single_window(
             tt = check_trend_template(ticker, avail, rs)
             if not tt["passes"]:
                 continue
+            _diag["tt_pass"] += 1
 
             # VCP on available data (strict anti-look-ahead).
             # Use watchlist_candidate (score >= 70) instead of alert (score >= 80
-            # AND live breakout on exactly today's bar): "alert" is calibrated for
-            # real-time daily scanning and almost never fires in historical simulation
-            # because "today's bar" is the final bar of the historical slice.
-            # The manual breakout check below replicates the essential condition.
+            # AND live breakout confirmed on today's bar).
+            #
+            # CRITICAL: do NOT use vcp["pivot_price"] for the breakout check.
+            # pivot_price = max(High[-PIVOT_ZONE_DAYS:]) which INCLUDES today's bar.
+            # Since close <= high always, current_close > pivot_price is mathematically
+            # impossible → 0 trades every run.  Instead compute resistance from the
+            # prior PIVOT_ZONE_DAYS bars (excluding today) so a genuine close above
+            # prior resistance is detectable.
             vcp = detect_vcp(ticker, avail, trend_template_passes=True)
-            pivot = vcp.get("pivot_price") or 0.0
-            current_close = float(avail["Close"].iloc[-1])
-            is_breakout = (
-                vcp.get("watchlist_candidate", False)
-                and pivot > 0
-                and current_close > pivot * 1.001   # price must be above pivot by 0.1%
-            )
-            if not is_breakout:
+            if not vcp.get("watchlist_candidate", False):
                 continue
+            _diag["vcp_wc"] += 1
+
+            current_close = float(avail["Close"].iloc[-1])
+            # Prior resistance: highest High in the PIVOT_ZONE_DAYS bars before today
+            lookback = min(settings.PIVOT_ZONE_DAYS, len(avail) - 1)
+            if lookback <= 0:
+                continue
+            prior_resistance = float(avail["High"].iloc[-lookback - 1 : -1].max())
+            if prior_resistance <= 0 or current_close <= prior_resistance * 1.001:
+                continue
+            _diag["breakout"] += 1
 
             # Entry at T+1 open with slippage
             future = df.loc[current_date:]
@@ -365,7 +380,9 @@ def _run_single_window(
             next_date = future.index[1]
             entry_price = round(float(df.loc[next_date, "Open"]) * (1 + SLIPPAGE), 4)
 
-            stop_price    = vcp["stop_price"]
+            stop_price = vcp.get("stop_price")
+            if stop_price is None or stop_price <= 0:
+                continue
             risk_per_share = entry_price - stop_price
             if risk_per_share <= 0:
                 continue
@@ -386,12 +403,21 @@ def _run_single_window(
                 "entry_date": next_date,
             }
             equity -= shares * entry_price    # cash out
+            _diag["entries"] += 1
             break  # one new entry per day to avoid look-ahead cascade
 
         # ---------------------------------------------------------------
         # 5. Record daily portfolio value (cash + open position MTM)
         # ---------------------------------------------------------------
         equity_series[current_date] = _mark_to_market()
+
+    # Log diagnostic stats for this window so filter bottlenecks are visible
+    logger.info(
+        "Window %s→%s | days=%d | tt_pass=%d | vcp_wc=%d | breakout=%d | entries=%d | trades=%d",
+        start.date(), end.date(),
+        _diag["days"], _diag["tt_pass"], _diag["vcp_wc"], _diag["breakout"],
+        _diag["entries"], len(trade_returns),
+    )
 
     if not equity_series:
         return None, []

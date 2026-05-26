@@ -20,10 +20,11 @@ def compute_cagr(portfolio: pd.Series) -> float:
 def compute_sharpe(portfolio: pd.Series, risk_free_rate: float = 0.05) -> float:
     """Annualised Sharpe ratio. risk_free_rate is annual (e.g. 0.05 = 5%)."""
     returns = portfolio.pct_change().dropna()
-    if returns.std() == 0:
+    std = float(returns.std())
+    if std < 1e-10:   # guard against flat-portfolio floating-point near-zero
         return 0.0
     excess = returns - risk_free_rate / 252
-    return float(excess.mean() / excess.std() * np.sqrt(252))
+    return float(excess.mean() / std * np.sqrt(252))
 
 
 def compute_sortino(portfolio: pd.Series, risk_free_rate: float = 0.05) -> float:
@@ -31,9 +32,15 @@ def compute_sortino(portfolio: pd.Series, risk_free_rate: float = 0.05) -> float
     returns = portfolio.pct_change().dropna()
     excess = returns - risk_free_rate / 252
     downside = excess[excess < 0]
-    if len(downside) == 0 or downside.std() == 0:
+    if len(downside) == 0:
         return 0.0
-    return float(excess.mean() / downside.std() * np.sqrt(252))
+    downside_std = float(downside.std())
+    # Guard against near-zero std (e.g. flat equity → all excess returns identical
+    # → std ≈ 8e-21 due to floating-point → ratio blows up to ~4e17).
+    # Any portfolio with effectively no downside deviation gets 0.0 (undefined).
+    if downside_std < 1e-10:
+        return 0.0
+    return float(excess.mean() / downside_std * np.sqrt(252))
 
 
 def compute_max_drawdown(portfolio: pd.Series) -> float:
