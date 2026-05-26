@@ -906,26 +906,37 @@ elif page == "📊 Backtest Results":
                     capture_output=True, text=True, timeout=600,
                     cwd=os.path.dirname(__file__),
                 )
+                stdout_out = (result.stdout or "").strip()
+                stderr_out = (result.stderr or "").strip()
+                # Last 6 000 chars of stderr keeps the ERROR line always visible
+                stderr_tail = stderr_out[-6000:] if len(stderr_out) > 6000 else stderr_out
+
                 if result.returncode == 0:
                     st.success("Backtest complete! Scroll down for results.")
                 else:
                     st.error("Backtest failed — see diagnostic output below.")
-                    # Show the stdout first (contains explicit traceback from backtest.py)
-                    # then the LAST part of stderr (INFO lines are at the top; ERROR is at the bottom).
-                    stdout_out = (result.stdout or "").strip()
-                    stderr_out = (result.stderr or "").strip()
-                    # Show last 6 000 chars of stderr so the ERROR line is always visible
-                    stderr_tail = stderr_out[-6000:] if len(stderr_out) > 6000 else stderr_out
 
-                    with st.expander("🔍 Diagnostic output (full error + traceback)", expanded=True):
-                        if stdout_out:
-                            st.subheader("stdout (exception traceback)")
-                            st.code(stdout_out, language="python")
-                        if stderr_tail:
-                            st.subheader("stderr log (last ~6 000 chars — error at bottom)")
-                            st.code(stderr_tail, language=None)
-                        if not stdout_out and not stderr_tail:
-                            st.warning("No output captured — process may have been killed by OOM.")
+                # Always show the [DIAG] window lines — they appear on both success and
+                # failure. On success they reveal which filter eliminated every candidate.
+                # On failure they show where the crash occurred.
+                _diag_lines = [l for l in stdout_out.splitlines() if l.strip()]
+                with st.expander(
+                    "🔍 Backtest diagnostics (filter funnel per window)",
+                    expanded=(result.returncode != 0 or not _diag_lines),
+                ):
+                    st.caption(
+                        "These [DIAG] lines show how many stocks passed each filter per "
+                        "walk-forward window. "
+                        "days = scan days | tt_pass = trend template | vcp_wc = VCP watchlist | "
+                        "breakout = price broke prior resistance | trades = executed trades."
+                    )
+                    if _diag_lines:
+                        st.code("\n".join(_diag_lines), language=None)
+                    elif stderr_tail:
+                        st.subheader("stderr log (last ~6 000 chars)")
+                        st.code(stderr_tail, language=None)
+                    else:
+                        st.warning("No output captured — process may have been killed by OOM.")
             except subprocess.TimeoutExpired:
                 st.error("Backtest timed out (>10 min) — process killed.")
                 st.info("Try reducing BACKTEST_END in settings.py or check VPS memory (docker stats).")

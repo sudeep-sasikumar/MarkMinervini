@@ -93,6 +93,7 @@ def fetch_fundamentals(ticker: str) -> dict:
           "ticker": str,
           "status": "ok" | "partial" | "unknown",
           "eps_growth_yoy": float | None,   # % quarterly EPS growth YoY
+          "eps_growth_yoy": float | None,   # % quarterly EPS growth YoY
           "rev_growth_yoy": float | None,   # % quarterly revenue growth YoY
           "gross_margin_current": float | None,
           "gross_margin_prior": float | None,
@@ -109,7 +110,16 @@ def fetch_fundamentals(ticker: str) -> dict:
     cache_key = f"fundamentals:{ticker}"
     cached = cache_get(cache_key)
     if cached is not None:
-        return cached
+        # Never serve a stale "unknown" result — that means all API calls previously
+        # failed or returned no EPS data. The new image has a better fallback path
+        # so we must re-run _build_fundamentals to get useful data.
+        if cached.get("status") == "unknown" or cached.get("eps_growth_yoy") is None:
+            logger.debug(
+                "Fundamentals %s: cached result is unusable (status=%s, eps=None) — refetching",
+                ticker, cached.get("status"),
+            )
+        else:
+            return cached  # Only use cache when we actually have useful data
 
     result = _build_fundamentals(ticker)
     cache_set(cache_key, result, ttl_seconds=TTL_7D)
