@@ -728,6 +728,23 @@ def main():
     except Exception as _exc:
         logger.warning("Startup cache clear failed (non-fatal): %s", _exc)
 
+    # Clear stale fundamentals cache entries so the new yfinance-primary path
+    # can succeed immediately (old Finnhub-based "unknown" entries were stored
+    # with a 7-day TTL and would otherwise block yfinance for a full week).
+    try:
+        from database.db import get_connection as _gc
+        _conn = _gc()
+        _n = _conn.execute(
+            "DELETE FROM cache WHERE key LIKE 'fundamentals:%'"
+        ).rowcount
+        _conn.commit()
+        _conn.close()
+        if _n:
+            logger.info("Startup: cleared %d stale fundamentals cache entries "
+                        "(yfinance will repopulate on first scan)", _n)
+    except Exception as _exc:
+        logger.warning("Fundamentals cache clear failed (non-fatal): %s", _exc)
+
     # Send startup confirmation
     from alerts.telegram_bot import send_startup_message, is_telegram_available
     tg_ok = is_telegram_available()

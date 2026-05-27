@@ -5,12 +5,17 @@ Deduplication and validation included.
 """
 
 import logging
+import re
 from typing import Optional
 
 import pandas as pd
 import requests
 
 from data.cache import get as cache_get, set as cache_set, TTL_1D
+
+# Valid ticker: 1-5 uppercase letters optionally followed by -A/-B suffix.
+# Allows BRK-B, BF-B while excluding numeric/CASH/footer rows in CSVs.
+_TICKER_RE = re.compile(r'^[A-Z][A-Z0-9]{0,4}(-[A-Z0-9]{1,2})?$')
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +105,8 @@ def get_russell1000_tickers() -> list[str]:
         if col is None:
             raise ValueError(f"Ticker column not found in IWB CSV. Columns: {list(df.columns)[:5]}")
         tickers = df[col].dropna().str.strip().tolist()
-        tickers = [t for t in tickers if t and t != "-" and len(t) <= 5 and t.isalpha()]
+        # Allow standard tickers + hyphenated share-class tickers (BRK-B, BF-B etc.)
+        tickers = [t for t in tickers if isinstance(t, str) and _TICKER_RE.match(t)]
         if len(tickers) < 200:
             raise ValueError(f"Only {len(tickers)} tickers parsed — likely wrong CSV section")
         logger.info("Russell 1000: %d tickers loaded", len(tickers))

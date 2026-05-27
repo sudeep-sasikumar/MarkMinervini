@@ -366,8 +366,18 @@ def job_weekly():
             except Exception as sec_exc:
                 logger.debug("SEC fetch failed for %s: %s", ticker, sec_exc)
                 report_text = "SEC data unavailable — manual review recommended"
-            ai = analyse_management_quality(ticker, report_text)
-            results.append(f"  {ticker}: {ai.get('rating', 'N/A')} — {ai.get('rationale', '')[:40]}")
+            try:
+                ai = analyse_management_quality(ticker, report_text)
+                if ai.get("offline"):
+                    logger.warning(
+                        "Weekly job: Ollama offline — skipping AI management analysis for %s", ticker
+                    )
+                    continue
+                results.append(f"  {ticker}: {ai.get('rating', 'N/A')} — {ai.get('rationale', '')[:40]}")
+            except Exception as ai_exc:
+                logger.warning(
+                    "Weekly job: AI management quality failed for %s (%s) — skipping", ticker, ai_exc
+                )
 
         if results:
             send_message("📊 Weekly Management Quality:\n" + "\n".join(results))

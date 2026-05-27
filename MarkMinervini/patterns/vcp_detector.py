@@ -196,22 +196,16 @@ def detect_vcp(
         prev_depth = contractions[i - 1]["depth_pct"]
         curr_depth = contractions[i]["depth_pct"]
 
-        # Hard fail 1: contraction is WIDER than the previous — not a VCP
+        # Hard fail: contraction is WIDER than the previous — not a VCP.
+        # Minervini's methodology requires DECLINING contractions (each smaller
+        # than the last). There is NO specified minimum tightening percentage —
+        # a pattern like [15%, 13%, 12%] is a valid VCP even though the final
+        # step only tightened by 8%. Pattern quality (how tight) is captured
+        # by the ATR ratio score in Step 7, not via a hard ratio gate here.
         if curr_depth >= prev_depth:
             base_result["rejection_reason"] = (
                 f"Step 5: Contraction {i+1} ({curr_depth:.1f}%) wider than "
-                f"contraction {i} ({prev_depth:.1f}%) — widening, not a VCP"
-            )
-            base_result["steps"] = steps
-            return base_result
-
-        # Hard fail 2: not tight enough — must shrink by at least (1 - RATIO)
-        # e.g. CONTRACTION_TIGHTENING_RATIO=0.85 → each must be < 85% of previous
-        required_max = prev_depth * settings.CONTRACTION_TIGHTENING_RATIO
-        if curr_depth > required_max:
-            base_result["rejection_reason"] = (
-                f"Step 5: Contraction {i+1} ({curr_depth:.1f}%) does not tighten enough "
-                f"— must be < {required_max:.1f}% (85% of {prev_depth:.1f}%)"
+                f"contraction {i} ({prev_depth:.1f}%) — pattern widening, not a VCP"
             )
             base_result["steps"] = steps
             return base_result

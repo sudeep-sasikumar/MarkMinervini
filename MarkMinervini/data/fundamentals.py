@@ -1,13 +1,19 @@
 """
 Fundamental data fetcher.
-Primary: Finnhub /stock/metric and /stock/financials-reported (free tier).
-Fallback: Alpha Vantage (25 calls/day limit — used sparingly).
-All results cached 7 days in SQLite.
+Primary:   yfinance (free, no API key, no rate limits) — earningsGrowth, revenueGrowth, grossMargins
+Fallback:  Finnhub /stock/metric + /stock/financials-reported (60 calls/min free tier)
+Last resort: Alpha Vantage (25 calls/day)
+
+Caching:
+  - ok / partial result  → 7 days  (stable, no need to re-fetch)
+  - unknown / no data    → 1 hour  (auto-retry; was 7 days before = stale trap)
+  - Cache bypass:        → "unknown" entries from old 7-day cache are always
+                            re-fetched so yfinance can succeed after a redeploy.
+
+SECURITY: Finnhub API token is NEVER included in log messages (only status codes).
 """
 
-import json
 import logging
-import os
 import threading
 import time
 from collections import deque
@@ -16,50 +22,71 @@ from typing import Optional
 import requests
 
 from config import settings
-from data.cache import get as cache_get, set as cache_set, TTL_7D
+from data.cache import get as cache_get, set as cache_set, TTL_7D, TTL_1H
 
 logger = logging.getLogger(__name__)
 
-_AV_CALLS_TODAY = 0  # rough in-process counter (resets on restart)
+_AV_CALLS_TODAY = 0
 
 # ---------------------------------------------------------------------------
-# Finnhub rate limiter — 55 calls / 60 s (free tier ceiling)
-# Uses a sliding-window deque; thread-safe via lock.
-# Previously fundamentals.py bypassed the shared rate limiter entirely,
-# causing 429 errors on batch runs.
+# Finnhub rate limiter — only used as fallback now that yfinance is primary.
+# Per-second minimum gap added to prevent burst 429s (Finnhub free tier
+# enforces ~1 call/second in addition to 60 calls/minute).
 # ---------------------------------------------------------------------------
 _fh_lock = threading.Lock()
 _fh_call_times: deque = deque()
+_fh_last_call: float = 0.0
+_FH_MIN_INTERVAL = 1.2   # seconds between consecutive Finnhub calls
 
 
 def _finnhub_get(endpoint: str, params: dict) -> Optional[dict]:
+    """
+    Rate-limited Finnhub API call.
+    SECURITY: token is appended at request time and NEVER logged (status code only).
+    """
     if not settings.FINNHUB_API_KEY:
         return None
 
+    symbol = params.get("symbol", "?")
+
     with _fh_lock:
+        # Per-second burst protection (free tier enforces ~1 RPS)
+        global _fh_last_call
         now = time.time()
-        # Drop calls older than the 60-second window
+        gap = now - _fh_last_call
+        if gap < _FH_MIN_INTERVAL:
+            time.sleep(_FH_MIN_INTERVAL - gap)
+        now = time.time()
+
+        # Per-minute window rate limiting (sliding deque)
         while _fh_call_times and now - _fh_call_times[0] > 60.0:
             _fh_call_times.popleft()
-        # If at the per-minute ceiling, sleep until the oldest call ages out
         if len(_fh_call_times) >= settings.FINNHUB_MAX_CALLS_PER_MIN:
-            wait = 60.0 - (now - _fh_call_times[0]) + 0.1
+            wait = 60.0 - (now - _fh_call_times[0]) + 0.5
             if wait > 0:
                 logger.debug("Finnhub rate limit: sleeping %.1fs", wait)
                 time.sleep(wait)
             now = time.time()
             while _fh_call_times and now - _fh_call_times[0] > 60.0:
                 _fh_call_times.popleft()
+
         _fh_call_times.append(time.time())
+        _fh_last_call = time.time()
 
     url = f"https://finnhub.io/api/v1{endpoint}"
-    params["token"] = settings.FINNHUB_API_KEY
+    call_params = dict(params)
+    call_params["token"] = settings.FINNHUB_API_KEY  # appended here, never logged
     try:
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get(url, params=call_params, timeout=10)
         resp.raise_for_status()
         return resp.json()
+    except requests.exceptions.HTTPError as http_err:
+        # Log status code ONLY — never log URL (contains API token)
+        status = http_err.response.status_code if http_err.response is not None else "?"
+        logger.warning("Finnhub %s [%s] HTTP %s", endpoint, symbol, status)
+        return None
     except Exception as exc:
-        logger.warning("Finnhub %s failed: %s", endpoint, exc)
+        logger.warning("Finnhub %s [%s] error: %s", endpoint, symbol, type(exc).__name__)
         return None
 
 
@@ -77,7 +104,7 @@ def _alpha_vantage_get(function: str, params: dict) -> Optional[dict]:
         _AV_CALLS_TODAY += 1
         return resp.json()
     except Exception as exc:
-        logger.warning("Alpha Vantage %s failed: %s", function, exc)
+        logger.warning("Alpha Vantage %s error: %s", function, type(exc).__name__)
         return None
 
 
@@ -87,42 +114,24 @@ def _alpha_vantage_get(function: str, params: dict) -> Optional[dict]:
 
 def fetch_fundamentals(ticker: str) -> dict:
     """
-    Return fundamental metrics for a ticker.
-    Shape:
-        {
-          "ticker": str,
-          "status": "ok" | "partial" | "unknown",
-          "eps_growth_yoy": float | None,   # % quarterly EPS growth YoY
-          "eps_growth_yoy": float | None,   # % quarterly EPS growth YoY
-          "rev_growth_yoy": float | None,   # % quarterly revenue growth YoY
-          "gross_margin_current": float | None,
-          "gross_margin_prior": float | None,
-          "eps_growth_annual": float | None,
-          "roe": float | None,              # %
-          "eps_surprise_pct": float | None, # % beat vs estimate
-          "institutional_own_pct": float | None,
-          "eps_revision_pct": float | None,
-          "fundamentals_score": int,        # 0–10 scored additions
-          "passes_hard_gates": bool,
-          "raw": dict,                      # raw Finnhub metric response
-        }
+    Return fundamental metrics for a ticker. Cache-backed.
+    TTL: 7 days for good/partial data; 1 hour for unknown (auto-retry).
+    Cache bypass: stale "unknown" entries from old 7-day cache are always
+    refetched so a fresh deploy can immediately use yfinance.
     """
     cache_key = f"fundamentals:{ticker}"
     cached = cache_get(cache_key)
     if cached is not None:
-        # Never serve a stale "unknown" result — that means all API calls previously
-        # failed or returned no EPS data. The new image has a better fallback path
-        # so we must re-run _build_fundamentals to get useful data.
+        # Bypass stale "unknown" entries — yfinance may now succeed where
+        # Finnhub previously failed. Good data (eps present) is always served.
         if cached.get("status") == "unknown" or cached.get("eps_growth_yoy") is None:
-            logger.debug(
-                "Fundamentals %s: cached result is unusable (status=%s, eps=None) — refetching",
-                ticker, cached.get("status"),
-            )
+            pass  # fall through to rebuild
         else:
-            return cached  # Only use cache when we actually have useful data
+            return cached  # valid cached data
 
     result = _build_fundamentals(ticker)
-    cache_set(cache_key, result, ttl_seconds=TTL_7D)
+    ttl = TTL_7D if result.get("status") in ("ok", "partial") else TTL_1H
+    cache_set(cache_key, result, ttl_seconds=ttl)
     return result
 
 
@@ -131,8 +140,8 @@ def _build_fundamentals(ticker: str) -> dict:
         "ticker": ticker,
         "status": "unknown",
         "eps_growth_yoy": None,
-        "eps_growth_prior_yoy": None,  # prior quarter's YoY growth (for acceleration check)
-        "eps_accelerating": False,     # True if current quarter's growth > prior quarter's
+        "eps_growth_prior_yoy": None,
+        "eps_accelerating": False,
         "rev_growth_yoy": None,
         "gross_margin_current": None,
         "gross_margin_prior": None,
@@ -146,101 +155,29 @@ def _build_fundamentals(ticker: str) -> dict:
         "raw": {},
     }
 
-    # --- Finnhub key metrics ---
-    # /stock/metric returns pre-computed growth rates on the free tier.
-    # We pull quarterly YoY growth directly from here (more reliable than
-    # parsing financials-reported whose field label matching is fragile).
-    metrics_data = _finnhub_get("/stock/metric", {"symbol": ticker, "metric": "all"})
-    if metrics_data and "metric" in metrics_data:
-        m = metrics_data["metric"]
-        base["raw"] = m
-        base["roe"] = m.get("roeTTM")
-        base["gross_margin_current"] = m.get("grossMarginTTM")
-        base["eps_growth_annual"] = m.get("epsGrowth5Y")  # approximation
-        base["institutional_own_pct"] = m.get("institutionalOwnershipPercentage")
-        base["status"] = "partial"
+    # --- 1. Primary: yfinance (free, unlimited, no API key needed) ---
+    _yfinance_fundamentals(ticker, base)
 
-        # --- Primary source for quarterly growth: metric endpoint fields ---
-        # Finnhub returns these as ratios (e.g. 0.25 = 25%).  Convert to %.
-        # Field name variants observed across Finnhub API versions:
-        #   epsGrowthQuarterlyYOY / epsGrowthQuarterlyYoy / epsGrowthTTMYoy
-        for _eps_field in ("epsGrowthQuarterlyYOY", "epsGrowthQuarterlyYoy", "epsGrowthTTMYoy"):
-            _v = m.get(_eps_field)
-            if _v is not None:
-                base["eps_growth_yoy"] = round(float(_v) * 100, 1)
-                break
+    # --- 2. Fallback: Finnhub (only if yfinance gave no EPS growth) ---
+    if base["eps_growth_yoy"] is None:
+        _finnhub_fundamentals(ticker, base)
 
-        for _rev_field in ("revenueGrowthQuarterlyYOY", "revenueGrowthQuarterlyYoy",
-                           "revenueGrowthTTMYoy", "revenueGrowth3Y"):
-            _v = m.get(_rev_field)
-            if _v is not None:
-                base["rev_growth_yoy"] = round(float(_v) * 100, 1)
-                break
-
-        # Prior-year gross margin for contraction check.
-        # Prefer explicit annual comparison if available.
-        for _gm_field in ("grossMarginAnnual", "grossMargin5Y"):
-            _v = m.get(_gm_field)
-            if _v is not None:
-                base["gross_margin_prior"] = float(_v)
-                break
-
-        if base["eps_growth_yoy"] is not None:
-            logger.info(
-                "Fundamentals %s: metric EPS=%+.1f%% rev=%s",
-                ticker,
-                base["eps_growth_yoy"],
-                f"{base['rev_growth_yoy']:+.1f}%" if base["rev_growth_yoy"] is not None else "n/a",
-            )
-        else:
-            # Diagnostic: log ALL growth-related keys from the metric response so we
-            # can identify the correct field name if it differs across API versions.
-            _growth_keys = {
-                k: v for k, v in m.items()
-                if any(kw in k.lower() for kw in ("growth", "eps", "rev", "earn"))
-                and v is not None
-            }
-            logger.info(
-                "Fundamentals %s: no quarterly EPS growth in metric endpoint. "
-                "Available growth fields: %s",
-                ticker, _growth_keys or "NONE",
-            )
-
-    # --- Finnhub reported financials for quarterly EPS/rev growth ---
-    # This provides more precise YoY comparisons but requires label matching.
-    # Only overrides the metric-endpoint values if it produces non-None results.
-    fins = _finnhub_get("/stock/financials-reported",
-                        {"symbol": ticker, "freq": "quarterly"})
-    if fins and fins.get("data"):
-        _parse_quarterly(fins["data"], base)
-        base["status"] = "ok"
-
-    # --- Fallback to Alpha Vantage if Finnhub gave nothing useful ---
+    # --- 3. Last resort: Alpha Vantage (25 calls/day limit) ---
     if base["eps_growth_yoy"] is None and base["status"] != "ok":
-        logger.debug(
-            "Fundamentals %s: Finnhub gave no EPS growth — trying Alpha Vantage fallback",
-            ticker,
-        )
         _alpha_vantage_fallback(ticker, base)
 
-    # --- Last-resort fallback: use 5-year annual EPS growth as quarterly proxy ---
-    # Finnhub free tier often omits per-quarter YoY fields; epsGrowth5Y is reliably
-    # present. A stock with strong multi-year EPS growth is still fundamentally sound.
-    # Marks the data as "proxy" via status to allow downstream review.
+    # --- 4. Annual EPS as quarterly proxy (last resort) ---
     if base["eps_growth_yoy"] is None and base["eps_growth_annual"] is not None:
         logger.info(
-            "Fundamentals %s: quarterly EPS YoY unavailable — using 5Y annual EPS growth "
-            "(%.1f%%) as proxy for eps_growth_yoy",
+            "Fundamentals %s: using 5Y annual EPS (%.1f%%) as quarterly proxy",
             ticker, base["eps_growth_annual"],
         )
         base["eps_growth_yoy"] = base["eps_growth_annual"]
-        base["status"] = "partial"   # flag so dashboard can show proxy caveat
+        base["status"] = "partial"
 
-    # --- Compute hard gates ---
-    eps_ok = (base["eps_growth_yoy"] is not None and
-              base["eps_growth_yoy"] >= settings.EPS_GROWTH_MIN)
-    rev_ok = (base["rev_growth_yoy"] is not None and
-              base["rev_growth_yoy"] >= settings.REVENUE_GROWTH_MIN)
+    # --- Hard gates ---
+    eps_ok = base["eps_growth_yoy"] is not None and base["eps_growth_yoy"] >= settings.EPS_GROWTH_MIN
+    rev_ok = base["rev_growth_yoy"] is not None and base["rev_growth_yoy"] >= settings.REVENUE_GROWTH_MIN
     margin_ok = (
         base["gross_margin_current"] is not None and
         base["gross_margin_prior"] is not None and
@@ -248,16 +185,14 @@ def _build_fundamentals(ticker: str) -> dict:
     )
     base["passes_hard_gates"] = eps_ok and rev_ok and margin_ok
 
-    # --- EPS acceleration: current quarter's YoY growth > prior quarter's YoY growth ---
-    # Requires both eps_growth_yoy (q0 vs q4) and eps_growth_prior_yoy (q1 vs q5).
+    # --- EPS acceleration ---
     if (base["eps_growth_yoy"] is not None and
             base["eps_growth_prior_yoy"] is not None and
             base["eps_growth_yoy"] > base["eps_growth_prior_yoy"]):
         base["eps_accelerating"] = True
 
-    # --- Compute scored additions (0–10) ---
+    # --- Scored additions (0–10) ---
     score = 0
-    # EPS acceleration: +2 (master prompt specifies this explicitly)
     if base["eps_accelerating"]:
         score += settings.EPS_ACCELERATION_SCORE
     if base["eps_growth_annual"] is not None and base["eps_growth_annual"] >= 25:
@@ -274,30 +209,166 @@ def _build_fundamentals(ticker: str) -> dict:
     base["fundamentals_score"] = min(score, 10)
 
     logger.debug(
-        "Fundamentals %s: status=%s eps_growth_yoy=%s rev_growth_yoy=%s "
-        "passes_hard_gates=%s score=%d",
-        ticker,
-        base["status"],
+        "Fundamentals %s: status=%s eps=%s rev=%s passes=%s score=%d",
+        ticker, base["status"],
         f"{base['eps_growth_yoy']:.1f}%" if base["eps_growth_yoy"] is not None else "None",
         f"{base['rev_growth_yoy']:.1f}%" if base["rev_growth_yoy"] is not None else "None",
-        base["passes_hard_gates"],
-        base["fundamentals_score"],
+        base["passes_hard_gates"], base["fundamentals_score"],
     )
     return base
 
 
-def _parse_quarterly(reports: list, base: dict) -> None:
-    """
-    Extract YoY EPS/revenue growth from Finnhub reported financials.
+# ---------------------------------------------------------------------------
+# Source 1: yfinance (PRIMARY)
+# ---------------------------------------------------------------------------
 
-    Quarters indexed (sorted descending by period):
-        q0 = most recent quarter
-        q1 = one quarter prior (for acceleration: compare q0 growth vs q1 growth)
-        q4 = same quarter last year (vs q0)
-        q5 = same quarter last year vs q1 (for prior-year comparison)
+def _yfinance_fundamentals(ticker: str, base: dict) -> None:
+    """
+    Populate fundamentals from Yahoo Finance via yfinance.
+    Free, no API key, no rate limits. Provides earningsGrowth, revenueGrowth,
+    and grossMargins which map directly to our quarterly YoY growth requirements.
+
+    earningsGrowth  → quarterly EPS YoY (decimal, e.g. 0.25 = +25%)
+    revenueGrowth   → quarterly revenue YoY (decimal)
+    grossMargins    → TTM gross margin (decimal)
     """
     try:
-        # Sort by period descending — most recent first
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+
+        # EPS growth (quarterly YoY)
+        for field in ("earningsGrowth", "earningsQuarterlyGrowth"):
+            v = info.get(field)
+            if v is not None and isinstance(v, (int, float)):
+                base["eps_growth_yoy"] = round(float(v) * 100, 1)
+                base["eps_growth_annual"] = round(float(v) * 100, 1)  # proxy
+                break
+
+        # Revenue growth (quarterly YoY)
+        rg = info.get("revenueGrowth")
+        if rg is not None and isinstance(rg, (int, float)):
+            base["rev_growth_yoy"] = round(float(rg) * 100, 1)
+
+        # Gross margins (TTM, decimal → %)
+        gm = info.get("grossMargins")
+        if gm is not None and isinstance(gm, (int, float)):
+            base["gross_margin_current"] = round(float(gm) * 100, 1)
+
+        # ROE (decimal → %)
+        roe = info.get("returnOnEquity")
+        if roe is not None and isinstance(roe, (int, float)):
+            base["roe"] = round(float(roe) * 100, 1)
+
+        # Institutional ownership (decimal → %)
+        inst = info.get("heldPercentInstitutions")
+        if inst is not None and isinstance(inst, (int, float)):
+            base["institutional_own_pct"] = round(float(inst) * 100, 1)
+
+        if base["eps_growth_yoy"] is not None or base["rev_growth_yoy"] is not None:
+            base["status"] = "ok"
+            logger.info(
+                "Fundamentals %s [yfinance]: EPS=%s rev=%s GM=%s",
+                ticker,
+                f"{base['eps_growth_yoy']:+.1f}%" if base["eps_growth_yoy"] is not None else "n/a",
+                f"{base['rev_growth_yoy']:+.1f}%" if base["rev_growth_yoy"] is not None else "n/a",
+                f"{base['gross_margin_current']:.1f}%" if base["gross_margin_current"] is not None else "n/a",
+            )
+        else:
+            logger.debug("Fundamentals %s: yfinance .info returned no growth data", ticker)
+
+        # Prior gross margin from quarterly financials (for YoY contraction check)
+        try:
+            qf = t.quarterly_financials
+            if qf is not None and not qf.empty:
+                gp_row, rev_row = None, None
+                for label in ("Gross Profit", "GrossProfit"):
+                    if label in qf.index:
+                        gp_row = qf.loc[label].dropna()
+                        break
+                for label in ("Total Revenue", "TotalRevenue"):
+                    if label in qf.index:
+                        rev_row = qf.loc[label].dropna()
+                        break
+                if (gp_row is not None and rev_row is not None and
+                        len(gp_row) >= 5 and len(rev_row) >= 5):
+                    rev_prior = float(rev_row.iloc[4])
+                    gp_prior = float(gp_row.iloc[4])
+                    if rev_prior != 0:
+                        base["gross_margin_prior"] = round(gp_prior / rev_prior * 100, 1)
+        except Exception:
+            pass  # prior margin not essential — filter handles missing gracefully
+
+    except Exception as exc:
+        logger.debug("yfinance fundamentals error for %s: %s", ticker, exc)
+
+
+# ---------------------------------------------------------------------------
+# Source 2: Finnhub (FALLBACK — only when yfinance has no EPS data)
+# ---------------------------------------------------------------------------
+
+def _finnhub_fundamentals(ticker: str, base: dict) -> None:
+    """
+    Secondary fundamentals source: Finnhub /stock/metric + /stock/financials-reported.
+    Only called when yfinance gave no useful EPS growth data.
+    Token is never logged — only HTTP status codes appear in log output.
+    """
+    metrics_data = _finnhub_get("/stock/metric", {"symbol": ticker, "metric": "all"})
+    if metrics_data and "metric" in metrics_data:
+        m = metrics_data["metric"]
+        base["raw"] = m
+        base["status"] = "partial"
+
+        # Fill in any fields yfinance didn't provide
+        if base["roe"] is None:
+            base["roe"] = m.get("roeTTM")
+        if base["gross_margin_current"] is None:
+            gm = m.get("grossMarginTTM")
+            if gm is not None:
+                base["gross_margin_current"] = gm
+        if base["eps_growth_annual"] is None:
+            base["eps_growth_annual"] = m.get("epsGrowth5Y")
+        if base["institutional_own_pct"] is None:
+            base["institutional_own_pct"] = m.get("institutionalOwnershipPercentage")
+
+        # EPS/revenue growth fields (Finnhub naming varies by API version)
+        for _eps_field in ("epsGrowthQuarterlyYOY", "epsGrowthQuarterlyYoy", "epsGrowthTTMYoy"):
+            _v = m.get(_eps_field)
+            if _v is not None:
+                base["eps_growth_yoy"] = round(float(_v) * 100, 1)
+                break
+
+        for _rev_field in ("revenueGrowthQuarterlyYOY", "revenueGrowthQuarterlyYoy",
+                           "revenueGrowthTTMYoy", "revenueGrowth3Y"):
+            _v = m.get(_rev_field)
+            if _v is not None:
+                base["rev_growth_yoy"] = round(float(_v) * 100, 1)
+                break
+
+        for _gm_field in ("grossMarginAnnual", "grossMargin5Y"):
+            _v = m.get(_gm_field)
+            if _v is not None and base["gross_margin_prior"] is None:
+                base["gross_margin_prior"] = float(_v)
+                break
+
+        if base["eps_growth_yoy"] is not None:
+            logger.info(
+                "Fundamentals %s [finnhub]: EPS=%+.1f%% rev=%s",
+                ticker, base["eps_growth_yoy"],
+                f"{base['rev_growth_yoy']:+.1f}%" if base["rev_growth_yoy"] is not None else "n/a",
+            )
+
+    fins = _finnhub_get("/stock/financials-reported",
+                        {"symbol": ticker, "freq": "quarterly"})
+    if fins and fins.get("data"):
+        _parse_quarterly(fins["data"], base)
+        if base["eps_growth_yoy"] is not None:
+            base["status"] = "ok"
+
+
+def _parse_quarterly(reports: list, base: dict) -> None:
+    """Extract YoY EPS/revenue growth from Finnhub reported financials."""
+    try:
         reports.sort(key=lambda r: r.get("period", ""), reverse=True)
         if len(reports) < 5:
             return
@@ -309,14 +380,13 @@ def _parse_quarterly(reports: list, base: dict) -> None:
         _GP_LABELS  = ["gross profit", "grossprofit"]
 
         def _find(report, names):
-            """Search income statement concepts by label."""
             for concept in report.get("report", {}).get("ic", []):
-                if concept.get("label", "").lower() in [n.lower() for n in names]:
+                if concept.get("label", "").lower() in names:
                     return concept.get("value")
             return None
 
-        q0 = reports[0]  # most recent quarter
-        q4 = reports[4]  # same quarter last year
+        q0 = reports[0]
+        q4 = reports[4]
 
         eps_now = _find(q0, _EPS_LABELS)
         eps_ly  = _find(q4, _EPS_LABELS)
@@ -327,34 +397,18 @@ def _parse_quarterly(reports: list, base: dict) -> None:
 
         if eps_now is not None and eps_ly is not None and eps_ly != 0:
             base["eps_growth_yoy"] = (eps_now - eps_ly) / abs(eps_ly) * 100
-        else:
-            q0_labels = [c.get("label", "") for c in q0.get("report", {}).get("ic", [])]
-            logger.debug(
-                "Fundamentals %s: EPS label not matched. "
-                "eps_now=%s eps_ly=%s | q0 IC labels (first 15): %s",
-                base.get("ticker"), eps_now, eps_ly, q0_labels[:15],
-            )
-
         if rev_now is not None and rev_ly is not None and rev_ly != 0:
             base["rev_growth_yoy"] = (rev_now - rev_ly) / abs(rev_ly) * 100
-        else:
-            logger.debug(
-                "Fundamentals %s: revenue label not matched. rev_now=%s rev_ly=%s",
-                base.get("ticker"), rev_now, rev_ly,
-            )
-
         if gp_now is not None and rev_now and rev_now != 0:
             base["gross_margin_current"] = gp_now / rev_now * 100
         if gp_ly is not None and rev_ly and rev_ly != 0:
             base["gross_margin_prior"] = gp_ly / rev_ly * 100
 
-        # --- EPS acceleration: compare current quarter's growth vs prior quarter's growth ---
-        # Requires q1 (one quarter back) and q5 (same quarter last year as q1).
         if len(reports) >= 6:
-            q1 = reports[1]  # one quarter prior
-            q5 = reports[5]  # same quarter last year (vs q1)
-            eps_q1    = _find(q1, _EPS_LABELS)
-            eps_q5    = _find(q5, _EPS_LABELS)
+            q1 = reports[1]
+            q5 = reports[5]
+            eps_q1 = _find(q1, _EPS_LABELS)
+            eps_q5 = _find(q5, _EPS_LABELS)
             if eps_q1 is not None and eps_q5 is not None and eps_q5 != 0:
                 base["eps_growth_prior_yoy"] = (eps_q1 - eps_q5) / abs(eps_q5) * 100
 
@@ -362,19 +416,12 @@ def _parse_quarterly(reports: list, base: dict) -> None:
         logger.debug("Quarterly parse error for %s: %s", base.get("ticker"), exc)
 
 
+# ---------------------------------------------------------------------------
+# Source 3: Alpha Vantage (LAST RESORT — 25 calls/day)
+# ---------------------------------------------------------------------------
+
 def _alpha_vantage_fallback(ticker: str, base: dict) -> None:
-    """
-    Use Alpha Vantage as last-resort fallback (max 25 calls/day).
-
-    Two separate endpoints are used because AV's INCOME_STATEMENT quarterly
-    reports do NOT reliably contain reportedEPS — that field lives in the
-    dedicated EARNINGS endpoint.  Mixing them caused EPS to always be None
-    when Finnhub failed, silently poisoning the hard-gate check.
-
-    Call order:
-      1. EARNINGS  → EPS (reportedEPS), surprise pct
-      2. INCOME_STATEMENT → revenue, gross profit (for margins)
-    """
+    """Last-resort fallback. Two endpoints: EARNINGS for EPS, INCOME_STATEMENT for revenue."""
 
     def _float(d: dict, k: str) -> Optional[float]:
         v = d.get(k)
@@ -385,38 +432,30 @@ def _alpha_vantage_fallback(ticker: str, base: dict) -> None:
                 pass
         return None
 
-    # --- 1. EARNINGS endpoint: per-share EPS (quarterly) ---
     eps_data = _alpha_vantage_get("EARNINGS", {"symbol": ticker})
     if eps_data and "quarterlyEarnings" in eps_data:
         try:
-            reports = eps_data["quarterlyEarnings"]
-            if len(reports) >= 5:
-                q0 = reports[0]   # most recent quarter
-                q4 = reports[4]   # same quarter last year
-                eps_now = _float(q0, "reportedEPS")
-                eps_ly  = _float(q4, "reportedEPS")
+            rpts = eps_data["quarterlyEarnings"]
+            if len(rpts) >= 5:
+                eps_now = _float(rpts[0], "reportedEPS")
+                eps_ly  = _float(rpts[4], "reportedEPS")
                 if eps_now is not None and eps_ly and eps_ly != 0:
                     base["eps_growth_yoy"] = (eps_now - eps_ly) / abs(eps_ly) * 100
-                # Bonus: capture earnings surprise if available
-                surprise = _float(q0, "surprisePercentage")
+                surprise = _float(rpts[0], "surprisePercentage")
                 if surprise is not None:
                     base["eps_surprise_pct"] = surprise
         except Exception as exc:
-            logger.debug("Alpha Vantage EARNINGS parse error for %s: %s", ticker, exc)
+            logger.debug("Alpha Vantage EARNINGS parse for %s: %s", ticker, exc)
 
-    # --- 2. INCOME_STATEMENT endpoint: revenue + gross profit ---
     income_data = _alpha_vantage_get("INCOME_STATEMENT", {"symbol": ticker})
     if income_data and "quarterlyReports" in income_data:
         try:
-            reports = income_data["quarterlyReports"]
-            if len(reports) >= 5:
-                q0 = reports[0]
-                q4 = reports[4]
-                rev_now = _float(q0, "totalRevenue")
-                rev_ly  = _float(q4, "totalRevenue")
-                gp_now  = _float(q0, "grossProfit")
-                gp_ly   = _float(q4, "grossProfit")
-
+            rpts = income_data["quarterlyReports"]
+            if len(rpts) >= 5:
+                rev_now = _float(rpts[0], "totalRevenue")
+                rev_ly  = _float(rpts[4], "totalRevenue")
+                gp_now  = _float(rpts[0], "grossProfit")
+                gp_ly   = _float(rpts[4], "grossProfit")
                 if rev_now is not None and rev_ly and rev_ly != 0:
                     base["rev_growth_yoy"] = (rev_now - rev_ly) / abs(rev_ly) * 100
                 if gp_now is not None and rev_now and rev_now != 0:
@@ -424,7 +463,7 @@ def _alpha_vantage_fallback(ticker: str, base: dict) -> None:
                 if gp_ly is not None and rev_ly and rev_ly != 0:
                     base["gross_margin_prior"] = gp_ly / rev_ly * 100
         except Exception as exc:
-            logger.debug("Alpha Vantage INCOME_STATEMENT parse error for %s: %s", ticker, exc)
+            logger.debug("Alpha Vantage INCOME_STATEMENT parse for %s: %s", ticker, exc)
 
     if base["eps_growth_yoy"] is not None or base["rev_growth_yoy"] is not None:
         base["status"] = "ok"
@@ -432,9 +471,11 @@ def _alpha_vantage_fallback(ticker: str, base: dict) -> None:
 
 if __name__ == "__main__":
     from database.db import init_db
-    logging.basicConfig(level=logging.INFO)
+    import logging as _logging
+    _logging.basicConfig(level=logging.INFO)
     init_db()
     result = fetch_fundamentals("AAPL")
     print(f"fundamentals.py: status={result['status']}, passes={result['passes_hard_gates']}")
     print(f"  EPS growth YoY: {result['eps_growth_yoy']}")
     print(f"  Revenue growth: {result['rev_growth_yoy']}")
+    print(f"  Gross margin:   {result['gross_margin_current']}")
