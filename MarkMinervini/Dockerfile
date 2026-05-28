@@ -20,9 +20,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code.
-# CACHE_BUST == GIT_COMMIT so this layer (and everything after) is always
-# rebuilt on every commit — prevents GHA Docker cache from serving stale code.
+# CACHE_BUST is explicitly passed as a build arg from GitHub Actions (== github.sha).
+# The RUN echo below forces Docker to rebuild this layer (and COPY . .) on every
+# commit, preventing the GHA layer cache from serving stale code.
 ARG CACHE_BUST=${GIT_COMMIT}
+RUN echo "Build commit: ${CACHE_BUST}" > /tmp/.cache_bust
 COPY . .
 
 # Create data and logs directories for SQLite persistence

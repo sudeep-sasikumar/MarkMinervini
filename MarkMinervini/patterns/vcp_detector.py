@@ -130,8 +130,11 @@ def detect_vcp(
     peak_pos = int(base_window["Close"].values.argmax())
     base_start_idx = len(df) - settings.MAX_BASE_TRADING_DAYS + peak_pos
 
-    # Pre-base window: look back up to 6 months before the base peak
-    pre_base_lookback = min(126, base_start_idx)
+    # Pre-base window: look back up to 2 years before the base peak.
+    # 504 trading days ≈ 2 years — necessary to capture the 2020-2021 bull run
+    # that precedes most 2022-2024 bases. The old 126-day (6-month) limit caused
+    # "prior advance 0%" failures for virtually every stock in the backtest period.
+    pre_base_lookback = min(504, base_start_idx)
     pre_base_start = max(0, base_start_idx - pre_base_lookback)
     pre_base_df = df.iloc[pre_base_start:base_start_idx]
 
@@ -215,13 +218,17 @@ def detect_vcp(
             return base_result
 
     # Scoring: Minervini validates 2-contraction VCPs ("W" base) as legitimate setups.
-    # Give base credit for 2, with bonuses for tighter 3- and 4-contraction setups.
+    # Scoring math with +25 base:
+    #   2c(+25) + all_vol(+25) + tight_ATR(+25) = 75 → passes watchlist (≥70) ✓
+    #   3c(+35) + all_vol(+25) + tight_ATR(+25) = 85 → alert-quality ✓
+    #   4c(+45) + all_vol(+25) + very_tight(+35) = 105 → capped at 100 ✓
+    # Old +15 base: 15+25+25=65 → BELOW 70 watchlist, causing backtest vcp_wc=0.
     if len(contractions) >= 2:
-        score += 15   # 2 contractions: base credit (was 0 — prevented watchlist entry)
+        score += 25   # 2 contractions: base credit
     if len(contractions) >= 3:
-        score += 10   # 3 contractions: total +25
+        score += 10   # 3 contractions: total +35
     if len(contractions) >= 4:
-        score += 10   # 4 contractions: total +35
+        score += 10   # 4 contractions: total +45
     steps["step5_valid"] = True
 
     # ------------------------------------------------------------------

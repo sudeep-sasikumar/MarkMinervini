@@ -305,18 +305,75 @@ def _yfinance_fundamentals(ticker: str, base: dict) -> None:
         logger.debug("yfinance fundamentals error for %s: %s", ticker, exc)
 
 
+def _parse_income_stmt_yoy(df: "pd.DataFrame", base: dict, source: str) -> None:
+    """
+    Extract YoY growth metrics from an income statement DataFrame.
+
+    source="quarterly": compare iloc[0] vs iloc[4] (same quarter, 1 year ago).
+                        Requires df.shape[1] >= 5.
+    source="annual":    compare iloc[0] vs iloc[1] (most-recent FY vs prior FY).
+                        Requires df.shape[1] >= 2. Annual is always reliable.
+    """
+    offset = 4 if source == "quarterly" else 1
+    if df.shape[1] <= offset:
+        return
+
+    # Revenue YoY
+    if base["rev_growth_yoy"] is None:
+        for label in ("Total Revenue", "TotalRevenue", "Revenue"):
+            if label in df.index:
+                row = df.loc[label].dropna()
+                if len(row) > offset:
+                    curr = float(row.iloc[0])
+                    prior = float(row.iloc[offset])
+                    if prior != 0 and curr > 0:
+                        base["rev_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
+                break
+
+    # EPS YoY — prefer Diluted EPS, fall back to Net Income as proxy
+    if base["eps_growth_yoy"] is None:
+        for label in ("Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
+                      "Net Income Common Stockholders", "Net Income", "NetIncome"):
+            if label in df.index:
+                row = df.loc[label].dropna()
+                if len(row) > offset:
+                    curr = float(row.iloc[0])
+                    prior = float(row.iloc[offset])
+                    if prior != 0:
+                        base["eps_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
+                break
+
+    # Gross margins (current and prior period)
+    gp_lbl = next((l for l in ("Gross Profit", "GrossProfit") if l in df.index), None)
+    rv_lbl = next((l for l in ("Total Revenue", "TotalRevenue", "Revenue") if l in df.index), None)
+    if gp_lbl and rv_lbl:
+        gp_row = df.loc[gp_lbl].dropna()
+        rv_row = df.loc[rv_lbl].dropna()
+        if len(rv_row) > 0 and float(rv_row.iloc[0]) != 0:
+            if base["gross_margin_current"] is None:
+                base["gross_margin_current"] = round(
+                    float(gp_row.iloc[0]) / float(rv_row.iloc[0]) * 100, 1
+                )
+        if len(rv_row) > offset and float(rv_row.iloc[offset]) != 0:
+            if base["gross_margin_prior"] is None:
+                base["gross_margin_prior"] = round(
+                    float(gp_row.iloc[offset]) / float(rv_row.iloc[offset]) * 100, 1
+                )
+
+
 def _yfinance_quarterly_growth(t, base: dict) -> None:
     """
-    Parse quarterly_income_stmt (yfinance 0.2.x+) for EPS and revenue YoY growth.
-    Called when .info dict doesn't have earningsGrowth / revenueGrowth — which is
-    the case for most S&P 500 stocks on Yahoo Finance's current API.
+    Parse income statements for EPS and revenue YoY growth.
 
-    Strategy: compare most-recent quarter (iloc[0]) vs same quarter 1 year ago
-    (iloc[4]) — four columns apart = exactly 12 months back.
-    Requires at least 5 columns (quarters) of history.
+    Cascading fallback strategy:
+    1. Quarterly income stmt (≥5 cols): compare Q0 vs Q4 (exact 12-month YoY).
+       yfinance only returns 4 quarters by default, so this often fails.
+    2. Annual income stmt  (≥2 cols):  compare FY0 vs FY1 (prior fiscal year).
+       Annual is ALWAYS available (2+ years) and fully satisfies Minervini's
+       EPS/Revenue growth criteria. This is the key fix for fundamentals=0/100.
     """
     try:
-        # Try quarterly_income_stmt (newer yfinance) then quarterly_financials (older alias)
+        # --- Step 1: Try quarterly (need ≥5 columns for proper same-quarter YoY) ---
         qis = None
         for attr in ("quarterly_income_stmt", "quarterly_financials"):
             try:
@@ -326,70 +383,44 @@ def _yfinance_quarterly_growth(t, base: dict) -> None:
                     break
             except Exception:
                 pass
-        if qis is None:
-            return
 
-        # Revenue YoY growth
-        if base["rev_growth_yoy"] is None:
-            for label in ("Total Revenue", "TotalRevenue", "Revenue"):
-                if label in qis.index:
-                    rev = qis.loc[label].dropna()
-                    if len(rev) >= 5:
-                        curr = float(rev.iloc[0])
-                        prior = float(rev.iloc[4])
-                        if prior != 0 and curr > 0:
-                            base["rev_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
-                    break
+        if qis is not None:
+            _parse_income_stmt_yoy(qis, base, "quarterly")
+            # Prior-year quarter for EPS acceleration check (need ≥6 cols)
+            if base["eps_growth_prior_yoy"] is None and qis.shape[1] >= 6:
+                for label in ("Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
+                              "Net Income Common Stockholders", "Net Income", "NetIncome"):
+                    if label in qis.index:
+                        row = qis.loc[label].dropna()
+                        if len(row) >= 6:
+                            curr_prior = float(row.iloc[1])  # Q-1
+                            year_prior = float(row.iloc[5])  # same Q, 1 year ago
+                            if year_prior != 0:
+                                base["eps_growth_prior_yoy"] = round(
+                                    (curr_prior - year_prior) / abs(year_prior) * 100, 1
+                                )
+                        break
 
-        # EPS YoY growth — prefer Diluted EPS, fall back to Net Income as proxy
-        if base["eps_growth_yoy"] is None:
-            for label in ("Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
-                          "Net Income Common Stockholders",
-                          "Net Income", "NetIncome"):
-                if label in qis.index:
-                    row = qis.loc[label].dropna()
-                    if len(row) >= 5:
-                        curr = float(row.iloc[0])
-                        prior = float(row.iloc[4])
-                        if prior != 0:
-                            base["eps_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
-                    break
-
-        # Prior gross margin (for YoY contraction check in fundamentals_filter)
-        if base["gross_margin_prior"] is None:
-            gp_lbl = next((l for l in ("Gross Profit", "GrossProfit") if l in qis.index), None)
-            rv_lbl = next((l for l in ("Total Revenue", "TotalRevenue", "Revenue")
-                           if l in qis.index), None)
-            if gp_lbl and rv_lbl:
-                gp_row = qis.loc[gp_lbl].dropna()
-                rv_row = qis.loc[rv_lbl].dropna()
-                if len(gp_row) >= 5 and len(rv_row) >= 5:
-                    gp_prior = float(gp_row.iloc[4])
-                    rv_prior = float(rv_row.iloc[4])
-                    if rv_prior != 0:
-                        base["gross_margin_prior"] = round(gp_prior / rv_prior * 100, 1)
-                    # Current gross margin (overwrite .info value if more precise)
-                    if base["gross_margin_current"] is None:
-                        gp_curr = float(gp_row.iloc[0])
-                        rv_curr = float(rv_row.iloc[0])
-                        if rv_curr != 0:
-                            base["gross_margin_current"] = round(gp_curr / rv_curr * 100, 1)
-
-        # Prior-year EPS for acceleration check
-        if base["eps_growth_prior_yoy"] is None and qis.shape[1] >= 6:
-            for label in ("Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
-                          "Net Income Common Stockholders",
-                          "Net Income", "NetIncome"):
-                if label in qis.index:
-                    row = qis.loc[label].dropna()
-                    if len(row) >= 6:
-                        curr_prior = float(row.iloc[1])  # Q-1 (one quarter back)
-                        year_prior = float(row.iloc[5])  # same Q, 1 year before Q-1
-                        if year_prior != 0:
-                            base["eps_growth_prior_yoy"] = round(
-                                (curr_prior - year_prior) / abs(year_prior) * 100, 1
+        # --- Step 2: Annual fallback — always has ≥2 fiscal years ---
+        # Triggered when quarterly has < 5 cols (the normal case with yfinance)
+        # or when quarterly data was missing EPS or revenue.
+        if base["eps_growth_yoy"] is None or base["rev_growth_yoy"] is None:
+            for attr in ("income_stmt", "financials"):
+                try:
+                    ann_df = getattr(t, attr, None)
+                    if ann_df is not None and not ann_df.empty and ann_df.shape[1] >= 2:
+                        _parse_income_stmt_yoy(ann_df, base, "annual")
+                        if base["eps_growth_yoy"] is not None or base["rev_growth_yoy"] is not None:
+                            logger.debug(
+                                "Fundamentals %s: annual income stmt YoY fallback used "
+                                "(quarterly had <5 cols) eps=%s rev=%s",
+                                base.get("ticker"),
+                                f"{base['eps_growth_yoy']:+.1f}%" if base["eps_growth_yoy"] is not None else "n/a",
+                                f"{base['rev_growth_yoy']:+.1f}%" if base["rev_growth_yoy"] is not None else "n/a",
                             )
-                    break
+                        break
+                except Exception:
+                    pass
 
     except Exception as exc:
         logger.debug("_yfinance_quarterly_growth error for %s: %s",
