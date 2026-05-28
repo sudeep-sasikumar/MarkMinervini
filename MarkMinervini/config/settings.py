@@ -157,7 +157,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # ---------------------------------------------------------------------------
 # Backtesting (Section 14)
 # ---------------------------------------------------------------------------
-BACKTEST_START = "2015-01-01"
+BACKTEST_START = "2021-01-01"   # shortened from 2015 — reduces RS computation ~60%
 BACKTEST_END = "2024-12-31"
 BACKTEST_MAX_POSITIONS = 10
 BACKTEST_SLIPPAGE = 0.002       # 0.2% slippage on all entries and exits

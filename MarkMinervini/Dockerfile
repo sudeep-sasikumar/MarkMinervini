@@ -19,7 +19,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Application code
+# Application code.
+# CACHE_BUST == GIT_COMMIT so this layer (and everything after) is always
+# rebuilt on every commit — prevents GHA Docker cache from serving stale code.
+ARG CACHE_BUST=${GIT_COMMIT}
 COPY . .
 
 # Create data and logs directories for SQLite persistence

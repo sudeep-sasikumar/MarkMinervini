@@ -256,7 +256,13 @@ def _run_single_window(
     _rejection_samples: list[str] = []
     _rejection_seen: set[str] = set()
 
-    for current_date in spy_period.index:
+    # RS cache — recomputed weekly (every 5 trading days) rather than daily.
+    # RS rankings change slowly; weekly resolution is accurate enough for backtesting
+    # and gives a 5× speedup (was the primary cause of >10 min backtest timeouts).
+    _rs_pct: dict[str, float] = {}
+    _rs_last_day: int = -99  # force compute on first day
+
+    for day_num, current_date in enumerate(spy_period.index):
         # ---------------------------------------------------------------
         # 1. Process exits for open positions
         # ---------------------------------------------------------------
@@ -304,36 +310,41 @@ def _run_single_window(
         # 3. Compute RS on data up to current_date (anti-look-ahead).
         #    Uses IBD/Minervini weighted quarterly formula to match the
         #    live system (0.40×Q4 + 0.20×Q3 + 0.20×Q2 + 0.20×Q1).
-        #    BUG FIX: was O(n²) via sorted_rs.index(v); now O(n log n)
-        #    via numpy argsort with correct tie-handling.
+        #    PERF: recomputed every 5 trading days (weekly) rather than
+        #    daily — 5× speedup, critical fix for >10 min timeout.
         # ---------------------------------------------------------------
-        rs_map: dict[str, float] = {}
-        for ticker, df in period_data.items():
-            avail = df.loc[:current_date]
-            if len(avail) < 252:
-                continue
-            c = avail["Close"]
-            p0   = float(c.iloc[-1])
-            p63  = float(c.iloc[-63])
-            p126 = float(c.iloc[-126])
-            p189 = float(c.iloc[-189])
-            p252 = float(c.iloc[-252])
-            if p63 > 0 and p126 > 0 and p189 > 0 and p252 > 0:
-                q4 = p0 / p63   - 1.0
-                q3 = p63 / p126 - 1.0
-                q2 = p126 / p189 - 1.0
-                q1 = p189 / p252 - 1.0
-                rs_map[ticker] = 0.40 * q4 + 0.20 * q3 + 0.20 * q2 + 0.20 * q1
+        if day_num - _rs_last_day >= 5:
+            rs_map: dict[str, float] = {}
+            for ticker, df in period_data.items():
+                avail = df.loc[:current_date]
+                if len(avail) < 252:
+                    continue
+                c = avail["Close"]
+                p0   = float(c.iloc[-1])
+                p63  = float(c.iloc[-63])
+                p126 = float(c.iloc[-126])
+                p189 = float(c.iloc[-189])
+                p252 = float(c.iloc[-252])
+                if p63 > 0 and p126 > 0 and p189 > 0 and p252 > 0:
+                    q4 = p0 / p63   - 1.0
+                    q3 = p63 / p126 - 1.0
+                    q2 = p126 / p189 - 1.0
+                    q1 = p189 / p252 - 1.0
+                    rs_map[ticker] = 0.40 * q4 + 0.20 * q3 + 0.20 * q2 + 0.20 * q1
 
-        rs_pct: dict[str, float] = {}
-        if rs_map:
-            tickers_rs = list(rs_map.keys())
-            values_rs  = np.array([rs_map[t] for t in tickers_rs], dtype=float)
-            order      = np.argsort(values_rs)          # weakest → strongest
-            ranks      = np.empty(len(order), dtype=float)
-            ranks[order] = np.arange(len(order), dtype=float)
-            n = float(len(tickers_rs))
-            rs_pct = {t: ranks[i] / n * 100.0 for i, t in enumerate(tickers_rs)}
+            if rs_map:
+                tickers_rs = list(rs_map.keys())
+                values_rs  = np.array([rs_map[t] for t in tickers_rs], dtype=float)
+                order      = np.argsort(values_rs)      # weakest → strongest
+                ranks      = np.empty(len(order), dtype=float)
+                ranks[order] = np.arange(len(order), dtype=float)
+                n = float(len(tickers_rs))
+                _rs_pct = {t: ranks[i] / n * 100.0 for i, t in enumerate(tickers_rs)}
+            else:
+                _rs_pct = {}
+            _rs_last_day = day_num
+
+        rs_pct = _rs_pct
 
         # ---------------------------------------------------------------
         # 4. Screen each ticker for a new entry signal

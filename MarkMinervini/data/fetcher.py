@@ -2,6 +2,11 @@
 Price and OHLCV data fetcher.
 Primary: yfinance (no API key, free).
 Fallback: Finnhub OHLCV endpoint (rate-limited token bucket, 55 calls/min).
+
+Functions: fetch_ohlcv, fetch_ohlcv_batch, fetch_latest_price, fetch_spy_ohlcv,
+           fetch_intraday_ohlcv, fetch_gbpusd, fetch_gbpusd_with_source, fetch_vix.
+
+SECURITY: Finnhub API token is NEVER logged (status code only).
 """
 
 import logging
@@ -57,7 +62,10 @@ _finnhub_bucket = _TokenBucket(
 
 
 def _finnhub_request(endpoint: str, params: dict) -> Optional[dict]:
-    """Make a rate-limited Finnhub API call."""
+    """
+    Make a rate-limited Finnhub API call.
+    SECURITY: token is appended at request time and NEVER logged (HTTP status only).
+    """
     if not settings.FINNHUB_API_KEY:
         return None
     if not _finnhub_bucket.acquire():
@@ -67,12 +75,18 @@ def _finnhub_request(endpoint: str, params: dict) -> Optional[dict]:
         import requests
 
         url = f"https://finnhub.io/api/v1{endpoint}"
-        params["token"] = settings.FINNHUB_API_KEY
-        resp = requests.get(url, params=params, timeout=10)
+        call_params = dict(params)
+        call_params["token"] = settings.FINNHUB_API_KEY  # never appears in logs
+        resp = requests.get(url, params=call_params, timeout=10)
         resp.raise_for_status()
         return resp.json()
+    except requests.exceptions.HTTPError as http_err:
+        # Log HTTP status code ONLY — never log URL (contains API token)
+        status = http_err.response.status_code if http_err.response is not None else "?"
+        logger.warning("Finnhub %s HTTP %s", endpoint, status)
+        return None
     except Exception as exc:
-        logger.warning("Finnhub request failed (%s): %s", endpoint, exc)
+        logger.warning("Finnhub request failed (%s): %s", endpoint, type(exc).__name__)
         return None
 
 

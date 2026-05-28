@@ -265,6 +265,11 @@ def _yfinance_fundamentals(ticker: str, base: dict) -> None:
         if inst is not None and isinstance(inst, (int, float)):
             base["institutional_own_pct"] = round(float(inst) * 100, 1)
 
+        # If .info didn't provide EPS/revenue growth, parse quarterly financials directly.
+        # Yahoo Finance's .info rarely has earningsGrowth populated for most S&P 500 stocks.
+        if base["eps_growth_yoy"] is None or base["rev_growth_yoy"] is None:
+            _yfinance_quarterly_growth(t, base)
+
         if base["eps_growth_yoy"] is not None or base["rev_growth_yoy"] is not None:
             base["status"] = "ok"
             logger.info(
@@ -275,32 +280,101 @@ def _yfinance_fundamentals(ticker: str, base: dict) -> None:
                 f"{base['gross_margin_current']:.1f}%" if base["gross_margin_current"] is not None else "n/a",
             )
         else:
-            logger.debug("Fundamentals %s: yfinance .info returned no growth data", ticker)
-
-        # Prior gross margin from quarterly financials (for YoY contraction check)
-        try:
-            qf = t.quarterly_financials
-            if qf is not None and not qf.empty:
-                gp_row, rev_row = None, None
-                for label in ("Gross Profit", "GrossProfit"):
-                    if label in qf.index:
-                        gp_row = qf.loc[label].dropna()
-                        break
-                for label in ("Total Revenue", "TotalRevenue"):
-                    if label in qf.index:
-                        rev_row = qf.loc[label].dropna()
-                        break
-                if (gp_row is not None and rev_row is not None and
-                        len(gp_row) >= 5 and len(rev_row) >= 5):
-                    rev_prior = float(rev_row.iloc[4])
-                    gp_prior = float(gp_row.iloc[4])
-                    if rev_prior != 0:
-                        base["gross_margin_prior"] = round(gp_prior / rev_prior * 100, 1)
-        except Exception:
-            pass  # prior margin not essential — filter handles missing gracefully
+            logger.debug("Fundamentals %s: yfinance .info and quarterly stmt both returned no growth data", ticker)
 
     except Exception as exc:
         logger.debug("yfinance fundamentals error for %s: %s", ticker, exc)
+
+
+def _yfinance_quarterly_growth(t, base: dict) -> None:
+    """
+    Parse quarterly_income_stmt (yfinance 0.2.x+) for EPS and revenue YoY growth.
+    Called when .info dict doesn't have earningsGrowth / revenueGrowth — which is
+    the case for most S&P 500 stocks on Yahoo Finance's current API.
+
+    Strategy: compare most-recent quarter (iloc[0]) vs same quarter 1 year ago
+    (iloc[4]) — four columns apart = exactly 12 months back.
+    Requires at least 5 columns (quarters) of history.
+    """
+    try:
+        # Try quarterly_income_stmt (newer yfinance) then quarterly_financials (older alias)
+        qis = None
+        for attr in ("quarterly_income_stmt", "quarterly_financials"):
+            try:
+                df = getattr(t, attr, None)
+                if df is not None and not df.empty and df.shape[1] >= 5:
+                    qis = df
+                    break
+            except Exception:
+                pass
+        if qis is None:
+            return
+
+        # Revenue YoY growth
+        if base["rev_growth_yoy"] is None:
+            for label in ("Total Revenue", "TotalRevenue", "Revenue"):
+                if label in qis.index:
+                    rev = qis.loc[label].dropna()
+                    if len(rev) >= 5:
+                        curr = float(rev.iloc[0])
+                        prior = float(rev.iloc[4])
+                        if prior != 0 and curr > 0:
+                            base["rev_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
+                    break
+
+        # EPS YoY growth — prefer Diluted EPS, fall back to Net Income as proxy
+        if base["eps_growth_yoy"] is None:
+            for label in ("Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
+                          "Net Income Common Stockholders",
+                          "Net Income", "NetIncome"):
+                if label in qis.index:
+                    row = qis.loc[label].dropna()
+                    if len(row) >= 5:
+                        curr = float(row.iloc[0])
+                        prior = float(row.iloc[4])
+                        if prior != 0:
+                            base["eps_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
+                    break
+
+        # Prior gross margin (for YoY contraction check in fundamentals_filter)
+        if base["gross_margin_prior"] is None:
+            gp_lbl = next((l for l in ("Gross Profit", "GrossProfit") if l in qis.index), None)
+            rv_lbl = next((l for l in ("Total Revenue", "TotalRevenue", "Revenue")
+                           if l in qis.index), None)
+            if gp_lbl and rv_lbl:
+                gp_row = qis.loc[gp_lbl].dropna()
+                rv_row = qis.loc[rv_lbl].dropna()
+                if len(gp_row) >= 5 and len(rv_row) >= 5:
+                    gp_prior = float(gp_row.iloc[4])
+                    rv_prior = float(rv_row.iloc[4])
+                    if rv_prior != 0:
+                        base["gross_margin_prior"] = round(gp_prior / rv_prior * 100, 1)
+                    # Current gross margin (overwrite .info value if more precise)
+                    if base["gross_margin_current"] is None:
+                        gp_curr = float(gp_row.iloc[0])
+                        rv_curr = float(rv_row.iloc[0])
+                        if rv_curr != 0:
+                            base["gross_margin_current"] = round(gp_curr / rv_curr * 100, 1)
+
+        # Prior-year EPS for acceleration check
+        if base["eps_growth_prior_yoy"] is None and qis.shape[1] >= 6:
+            for label in ("Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
+                          "Net Income Common Stockholders",
+                          "Net Income", "NetIncome"):
+                if label in qis.index:
+                    row = qis.loc[label].dropna()
+                    if len(row) >= 6:
+                        curr_prior = float(row.iloc[1])  # Q-1 (one quarter back)
+                        year_prior = float(row.iloc[5])  # same Q, 1 year before Q-1
+                        if year_prior != 0:
+                            base["eps_growth_prior_yoy"] = round(
+                                (curr_prior - year_prior) / abs(year_prior) * 100, 1
+                            )
+                    break
+
+    except Exception as exc:
+        logger.debug("_yfinance_quarterly_growth error for %s: %s",
+                     base.get("ticker"), exc)
 
 
 # ---------------------------------------------------------------------------
