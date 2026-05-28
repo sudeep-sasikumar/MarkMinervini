@@ -154,6 +154,7 @@ def detect_vcp(
             f"Step 2: Prior advance {prior_advance_pct:.1f}% < {settings.MIN_PRIOR_ADVANCE}%"
         )
         base_result["steps"] = steps
+        logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
         return base_result
 
     # ------------------------------------------------------------------
@@ -173,6 +174,7 @@ def detect_vcp(
             f"(minimum {settings.MIN_BASE_TRADING_DAYS} trading days)"
         )
         base_result["steps"] = steps
+        logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
         return base_result
 
     # ------------------------------------------------------------------
@@ -190,6 +192,7 @@ def detect_vcp(
             f"Step 5: Only {len(contractions)} contraction(s); minimum {settings.MIN_CONTRACTIONS}"
         )
         base_result["steps"] = steps
+        logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
         return base_result
 
     for i in range(1, len(contractions)):
@@ -208,6 +211,7 @@ def detect_vcp(
                 f"contraction {i} ({prev_depth:.1f}%) — pattern widening, not a VCP"
             )
             base_result["steps"] = steps
+            logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
             return base_result
 
     # Scoring: Minervini validates 2-contraction VCPs ("W" base) as legitimate setups.
@@ -316,6 +320,7 @@ def detect_vcp(
         base_result["grade"] = grade_vcp(score)
         base_result["contractions"] = contractions
         base_result["steps"] = steps
+        logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
         return base_result
 
     # ------------------------------------------------------------------
@@ -393,15 +398,39 @@ def detect_vcp(
     # ALERT requires BOTH score >= 80 AND confirmed breakout
     if score >= settings.VCP_SCORE_MIN and risk_valid and breakout:
         base_result["alert"] = True
+        logger.info(
+            "VCP ALERT: %s | score=%d (%s) | contractions=%d | ATR=%.2f "
+            "| stop=%.1f%% | pivot=$%.2f | vol=%.1fx avg",
+            ticker, score, grade_vcp(score), len(contractions),
+            atr_ratio, stop_pct, pivot_price,
+            today_vol / avg_vol_50 if avg_vol_50 > 0 else 0,
+        )
     elif score >= settings.VCP_SCORE_MIN and risk_valid and not breakout:
         base_result["rejection_reason"] = (
             f"No confirmed breakout: close ${today_close:.2f} <= pivot ${pivot_price:.2f} "
             f"or volume {today_vol:,.0f} < {avg_vol_50 * settings.BREAKOUT_VOLUME_RATIO:,.0f} "
             f"(1.4× avg). Add to watchlist — await breakout."
         )
+        logger.info(
+            "VCP near-breakout (watchlist): %s | score=%d | pivot=$%.2f | "
+            "close=$%.2f | vol=%.1fx avg",
+            ticker, score, pivot_price, today_close,
+            today_vol / avg_vol_50 if avg_vol_50 > 0 else 0,
+        )
+    elif score >= 70 and risk_valid:
+        logger.info(
+            "VCP watchlist candidate: %s | score=%d | contractions=%d | "
+            "ATR=%.2f | stop=%.1f%% | pivot=$%.2f",
+            ticker, score, len(contractions), atr_ratio, stop_pct, pivot_price,
+        )
     elif score < settings.VCP_SCORE_MIN:
         base_result["rejection_reason"] = (
             f"VCP score {score} < minimum {settings.VCP_SCORE_MIN}"
+        )
+        logger.debug(
+            "VCP %s: score=%d contractions=%d ATR=%.2f vol=%s wide_bars=%d dry_up=%d",
+            ticker, score, len(contractions), atr_ratio,
+            steps.get("volume_declining", "?"), wide_bars, dry_up_days,
         )
 
     return base_result

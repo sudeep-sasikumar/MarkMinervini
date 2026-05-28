@@ -208,13 +208,32 @@ def _build_fundamentals(ticker: str) -> dict:
         score += 2
     base["fundamentals_score"] = min(score, 10)
 
+    # Determine data source label for diagnostics
+    _src = "none"
+    if base.get("status") in ("ok", "partial"):
+        if base.get("raw"):
+            _src = "finnhub"
+        else:
+            _src = "yfinance"
+
     logger.debug(
-        "Fundamentals %s: status=%s eps=%s rev=%s passes=%s score=%d",
-        ticker, base["status"],
-        f"{base['eps_growth_yoy']:.1f}%" if base["eps_growth_yoy"] is not None else "None",
-        f"{base['rev_growth_yoy']:.1f}%" if base["rev_growth_yoy"] is not None else "None",
+        "Fundamentals %s [%s]: status=%s eps=%s rev=%s gm_now=%s gm_prior=%s "
+        "roe=%s inst=%s passes=%s score=%d",
+        ticker, _src, base["status"],
+        f"{base['eps_growth_yoy']:+.1f}%" if base["eps_growth_yoy"] is not None else "None",
+        f"{base['rev_growth_yoy']:+.1f}%" if base["rev_growth_yoy"] is not None else "None",
+        f"{base['gross_margin_current']:.1f}%" if base["gross_margin_current"] is not None else "None",
+        f"{base['gross_margin_prior']:.1f}%" if base["gross_margin_prior"] is not None else "None",
+        f"{base['roe']:.1f}%" if base["roe"] is not None else "None",
+        f"{base['institutional_own_pct']:.1f}%" if base["institutional_own_pct"] is not None else "None",
         base["passes_hard_gates"], base["fundamentals_score"],
     )
+    if base["status"] == "unknown":
+        logger.warning(
+            "Fundamentals %s: ALL sources failed (yfinance + finnhub + alpha_vantage) "
+            "— stock will be rejected at fundamentals gate",
+            ticker,
+        )
     return base
 
 

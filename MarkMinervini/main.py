@@ -53,17 +53,21 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
     start_time = time.time()
 
     signals_generated = []
+    _step_times: dict[str, float] = {}   # step_name → elapsed seconds
 
     try:
         # --- Step 1: Universe + price data ---
         from screening.universe import get_universe
         from data.fetcher import fetch_ohlcv_batch, fetch_spy_ohlcv
 
+        _t0 = time.time()
         universe = get_universe()
         logger.info("Universe: %d tickers", len(universe))
 
         price_data = fetch_ohlcv_batch(universe, period="2y")
-        logger.info("Price data loaded: %d tickers with sufficient history", len(price_data))
+        _step_times["data_fetch"] = time.time() - _t0
+        logger.info("Price data loaded: %d tickers with sufficient history [%.1fs]",
+                    len(price_data), _step_times["data_fetch"])
 
         # Universe coverage check — abort if fewer than 80% of tickers loaded.
         # A mass API failure would silently produce meaningless RS rankings that
@@ -114,31 +118,76 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         # --- Step 4: Trend Template filter ---
         from screening.trend_template import check_trend_template
 
+        _t0 = time.time()
         trend_passed = []
+        _tt_crit_fails: dict[str, int] = {}  # criterion → count of stocks failing it
+        _tt_score_dist: dict[int, int] = {}  # score → count (0–8)
         for ticker, df in price_data.items():
             rs = rs_map.get(ticker, 0.0)
             tt = check_trend_template(ticker, df, rs_rating=rs)
             if tt["passes"]:
                 trend_passed.append((ticker, df, tt, rs))
+            else:
+                d = tt.get("details", {})
+                for crit, label in (
+                    ("c1_price_above_sma50",  "C1-above-SMA50"),
+                    ("c2_price_above_sma150", "C2-above-SMA150"),
+                    ("c3_price_above_sma200", "C3-above-SMA200"),
+                    ("c4_sma200_rising",      "C4-SMA200-rising"),
+                    ("c5_ma_stack",           "C5-MA-stack"),
+                    ("c6_near_52wk_high",     "C6-near-52wk-high"),
+                    ("c7_above_52wk_low",     "C7-above-52wk-low"),
+                    ("c8_rs_rating",          "C8-RS≥70"),
+                ):
+                    if not d.get(crit, True):
+                        _tt_crit_fails[label] = _tt_crit_fails.get(label, 0) + 1
+            s = tt.get("score", 0)
+            _tt_score_dist[s] = _tt_score_dist.get(s, 0) + 1
 
-        logger.info("Trend Template: %d/%d passed", len(trend_passed), len(price_data))
+        _step_times["trend_template"] = time.time() - _t0
+        logger.info("Trend Template: %d/%d passed [%.1fs]",
+                    len(trend_passed), len(price_data), _step_times["trend_template"])
+
+        # Log the top criterion failure reasons so we know what's blocking stocks
+        if _tt_crit_fails:
+            _top_fails = sorted(_tt_crit_fails.items(), key=lambda x: -x[1])[:5]
+            logger.info("  TT failures by criterion: %s",
+                        " | ".join(f"{lbl}={cnt}" for lbl, cnt in _top_fails))
+        # Log score distribution — e.g. "7/8: 45 stocks  6/8: 92 stocks"
+        if _tt_score_dist:
+            _dist_str = "  ".join(
+                f"{s}/8:{c}"
+                for s, c in sorted(_tt_score_dist.items(), reverse=True)
+                if s >= 5
+            )
+            if _dist_str:
+                logger.info("  TT score dist (≥5/8): %s", _dist_str)
 
         # --- Step 5: Fundamentals filter ---
         from screening.fundamentals_filter import apply_fundamentals_filter
 
+        _t0 = time.time()
         fundamentals_passed = []
         _fund_rejection_sample: dict[str, int] = {}  # reason → count
+        _fund_sources: dict[str, int] = {}  # data source → count
         for ticker, df, tt, rs in trend_passed:
             fund = apply_fundamentals_filter(ticker)
             if fund["passes"]:
                 fundamentals_passed.append((ticker, df, tt, rs, fund))
+                # Track which source provided data
+                src = fund.get("details", {}).get("status", "unknown")
+                _fund_sources[src] = _fund_sources.get(src, 0) + 1
             else:
                 reason = fund.get("rejection_reason", "unknown")
-                # Bucket by first 60 chars so similar reasons group together
                 key = reason[:60]
                 _fund_rejection_sample[key] = _fund_rejection_sample.get(key, 0) + 1
 
-        logger.info("Fundamentals: %d/%d passed", len(fundamentals_passed), len(trend_passed))
+        _step_times["fundamentals"] = time.time() - _t0
+        logger.info("Fundamentals: %d/%d passed [%.1fs]",
+                    len(fundamentals_passed), len(trend_passed), _step_times["fundamentals"])
+        if _fund_sources:
+            logger.info("  Fundamentals sources: %s",
+                        " | ".join(f"{s}={c}" for s, c in _fund_sources.items()))
 
         # If every single stock failed fundamentals, that is almost certainly an API
         # key configuration problem rather than genuinely bad fundamentals — alert loudly.
@@ -196,10 +245,14 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
             "trend_template": len(trend_passed),
             "fundamentals": len(fundamentals_passed),
             "vcp": 0,
+            "watchlist": 0,
             "signals": 0,
         }
 
         import json as _json
+        _vcp_rejections: dict[str, int] = {}   # rejection reason bucket → count
+        _vcp_score_dist: dict[str, int] = {}   # "0-19","20-39",... → count
+        _t0_vcp = time.time()
 
         for ticker, df, tt, rs, fund in fundamentals_passed:
             try:
@@ -218,9 +271,18 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                 # pattern where it was fetched again at the alert gate below).
                 sector_info = _get_ticker_sector(ticker)
 
+                # Track VCP outcome for diagnostic summary
+                _vscore = vcp["vcp_score"]
+                _vbucket = f"{(_vscore // 20) * 20}-{(_vscore // 20) * 20 + 19}"
+                _vcp_score_dist[_vbucket] = _vcp_score_dist.get(_vbucket, 0) + 1
+                if not vcp["watchlist_candidate"]:
+                    _rej = (vcp.get("rejection_reason") or f"score={_vscore}<70")[:55]
+                    _vcp_rejections[_rej] = _vcp_rejections.get(_rej, 0) + 1
+
                 # Add to watchlist/setups if score >= 70 (moderate VCP — setup forming)
                 if vcp["vcp_score"] >= 70:
                     scan_funnel["vcp"] += 1
+                    scan_funnel["watchlist"] += 1
                     upsert_watchlist(ticker, {
                         "ticker": ticker,
                         "company_name": sector_info.get("name", ticker),
@@ -376,15 +438,42 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
             except Exception as exc:
                 logger.error("Pipeline error for %s: %s", ticker, exc, exc_info=True)
 
+        _step_times["vcp"] = time.time() - _t0_vcp
         elapsed = time.time() - start_time
-        logger.info("SCAN COMPLETE in %.1fs | Funnel: Universe=%d → Trend=%d → "
-                    "Fundamentals=%d → VCP=%d → Signals=%d",
-                    elapsed,
-                    scan_funnel["universe"],
-                    scan_funnel["trend_template"],
-                    scan_funnel["fundamentals"],
-                    scan_funnel["vcp"],
-                    scan_funnel["signals"])
+
+        # ── SCAN REPORT ─────────────────────────────────────────────────────
+        logger.info("=" * 60)
+        logger.info("SCAN COMPLETE in %.1fs", elapsed)
+        logger.info("  Funnel: Universe=%d → PriceData=%d → TrendTemplate=%d"
+                    " → Fundamentals=%d → VCP(≥70)=%d → Watchlist=%d → Signals=%d",
+                    scan_funnel["universe"], scan_funnel["price_data"],
+                    scan_funnel["trend_template"], scan_funnel["fundamentals"],
+                    scan_funnel["vcp"], scan_funnel["watchlist"], scan_funnel["signals"])
+        logger.info("  Step times: data=%.1fs  TT=%.1fs  fund=%.1fs  VCP=%.1fs",
+                    _step_times.get("data_fetch", 0), _step_times.get("trend_template", 0),
+                    _step_times.get("fundamentals", 0), _step_times.get("vcp", 0))
+        logger.info("  Regime: %s | VIX=%.1f | Breadth=%.1f%% | DistDays=%d | FTD=%s",
+                    regime["regime"], regime.get("vix_level", 0),
+                    regime.get("breadth_pct") or 0, regime.get("distribution_days", 0),
+                    regime.get("ftd_confirmed", "?"))
+        if _tt_crit_fails:
+            _top = sorted(_tt_crit_fails.items(), key=lambda x: -x[1])[:4]
+            logger.info("  TT top blocks: %s", " | ".join(f"{l}={c}" for l, c in _top))
+        if fundamentals_passed or _fund_rejection_sample:
+            _top_fund = sorted(_fund_rejection_sample.items(), key=lambda x: -x[1])[:3]
+            if _top_fund:
+                logger.info("  Fund top blocks: %s",
+                            " | ".join(f'"{r}"={c}' for r, c in _top_fund))
+        if _vcp_rejections:
+            _top_vcp = sorted(_vcp_rejections.items(), key=lambda x: -x[1])[:4]
+            logger.info("  VCP top blocks: %s",
+                        " | ".join(f'"{r}"={c}' for r, c in _top_vcp))
+        if _vcp_score_dist:
+            logger.info("  VCP score dist: %s",
+                        " | ".join(f"{b}:{c}" for b, c in
+                                   sorted(_vcp_score_dist.items())))
+        logger.info("=" * 60)
+        # ────────────────────────────────────────────────────────────────────
 
         # Log scan funnel to DB
         _log_scan_funnel(scan_funnel, elapsed)
@@ -705,7 +794,21 @@ def main():
         _git_commit[:8] if len(_git_commit) > 8 else _git_commit,
         _build_date,
     )
-    logger.info("DB: %s | Log: %s", settings.DB_PATH, LOG_PATH)
+    logger.info("DB: %s | Log: %s | Level: %s", settings.DB_PATH, LOG_PATH, LOG_LEVEL)
+    logger.info(
+        "Config: EPS_min=%d%% Rev_min=%d%% VCP_min=%d RS_min=%d "
+        "Backtest=%s→%s Account=£%s",
+        settings.EPS_GROWTH_MIN, settings.REVENUE_GROWTH_MIN,
+        settings.VCP_SCORE_MIN, settings.RS_MINIMUM,
+        settings.BACKTEST_START, settings.BACKTEST_END,
+        f"{settings.ACCOUNT_EQUITY_GBP:,.0f}",
+    )
+    logger.info(
+        "API keys: Finnhub=%s AlphaVantage=%s Telegram=%s",
+        "SET" if settings.FINNHUB_API_KEY else "NOT SET",
+        "SET" if settings.ALPHA_VANTAGE_KEY else "NOT SET",
+        "SET" if settings.TELEGRAM_BOT_TOKEN else "NOT SET",
+    )
 
     # Initialise database
     init_db()

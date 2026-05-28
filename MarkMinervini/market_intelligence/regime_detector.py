@@ -60,6 +60,38 @@ def detect_regime(
     vix = _raw_vix or 20.0
     result = _assess_regime(spy_df, qqq_df, vix, breadth_pct)
 
+    # Log full regime breakdown so a single log run explains every decision
+    logger.info(
+        "Regime: %s | aggression=%.2f | signals=%s",
+        result["regime"], result["aggression_factor"], result["signals_allowed"],
+    )
+    logger.info(
+        "  SPY=$%.2f SMA50=$%.2f SMA150=$%.2f SMA200=$%.2f "
+        "above200=%s stack=%s [data=%s]",
+        result.get("spy_close") or 0,
+        result.get("spy_sma50") or 0,
+        result.get("spy_sma150") or 0,
+        result.get("spy_sma200") or 0,
+        result.get("spy_above_sma200"),
+        result.get("spy_ma_stack_ok"),
+        result.get("spy_last_date", "?"),
+    )
+    logger.info(
+        "  VIX=%.1f (caution≥%d danger≥%d) | "
+        "breadth=%.1f%% (weak<%d bear<%d) | "
+        "dist_days=%d (caution≥%d danger≥%d) | FTD=%s",
+        vix, settings.VIX_CAUTION, settings.VIX_DANGER,
+        result.get("breadth_pct") or 0,
+        settings.BREADTH_WEAK, settings.BREADTH_BEAR,
+        result.get("distribution_days", 0),
+        settings.DISTRIBUTION_DAYS_CAUTION, settings.DISTRIBUTION_DAYS_DANGER,
+        result.get("ftd_confirmed"),
+    )
+    if result.get("regime_summary") and result["regime_summary"] != "All systems healthy":
+        logger.info("  Regime issues: %s", result["regime_summary"])
+    else:
+        logger.info("  Regime: All systems healthy ✓")
+
     cache_set(cache_key, result, ttl_seconds=TTL_1H)
     return result
 

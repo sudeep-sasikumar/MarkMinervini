@@ -17,6 +17,7 @@ Schedule:
 
 import logging
 import os
+import time
 from datetime import datetime
 
 import pytz
@@ -145,6 +146,7 @@ def create_scheduler() -> BackgroundScheduler:
 
 def job_data_refresh():
     """08:00 BST — Download OHLCV, update fundamentals cache, compute RS and breadth."""
+    _job_start = time.time()
     logger.info("=== JOB: Data Refresh ===")
     try:
         from data.cache import purge_expired
@@ -156,25 +158,45 @@ def job_data_refresh():
         from config import settings as _settings
 
         purge_expired()
-        universe = get_universe()
-        price_data = fetch_ohlcv_batch(universe, period="2y")
 
+        _t = time.time()
+        universe = get_universe()
+        logger.info("  Universe: %d tickers [%.1fs]", len(universe), time.time() - _t)
+
+        _t = time.time()
+        price_data = fetch_ohlcv_batch(universe, period="2y")
+        coverage = len(price_data) / max(len(universe), 1) * 100
+        logger.info("  OHLCV: %d/%d tickers (%.0f%% coverage) [%.1fs]",
+                    len(price_data), len(universe), coverage, time.time() - _t)
+        if coverage < 90:
+            logger.warning("  LOW COVERAGE: only %.0f%% of universe downloaded — "
+                           "API may be throttling or unavailable", coverage)
+
+        _t = time.time()
         rs_df = compute_rs_ratings(price_data)
+        rs_threshold = len(rs_df[rs_df["rs_rating"] >= 70]) if rs_df is not None and len(rs_df) else 0
+        logger.info("  RS: %d tickers ranked, %d qualify (≥70) [%.1fs]",
+                    len(rs_df) if rs_df is not None else 0, rs_threshold, time.time() - _t)
+
+        _t = time.time()
         breadth = compute_breadth(price_data)
+        logger.info("  Breadth: %.1f%% above 200-SMA [%.1fs]", breadth, time.time() - _t)
 
         # Remove watchlist entries that haven't been refreshed recently.
-        # The full scan runs after this job and will re-add any stock that
-        # still qualifies — so stale entries are ones the scanner stopped confirming.
-        cleanup_stale_watchlist(max_age_days=_settings.WATCHLIST_MAX_AGE_DAYS)
+        removed = cleanup_stale_watchlist(max_age_days=_settings.WATCHLIST_MAX_AGE_DAYS)
+        if removed:
+            logger.info("  Watchlist: removed %d stale entries (not refreshed in %dd)",
+                        removed, _settings.WATCHLIST_MAX_AGE_DAYS)
 
-        logger.info("Data refresh complete: %d tickers, breadth=%.1f%%",
-                    len(price_data), breadth)
+        logger.info("=== JOB: Data Refresh DONE in %.1fs ===", time.time() - _job_start)
     except Exception as exc:
-        logger.error("Data refresh failed: %s", exc, exc_info=True)
+        logger.error("Data refresh failed after %.1fs: %s",
+                     time.time() - _job_start, exc, exc_info=True)
 
 
 def job_market_intelligence():
     """09:00 BST — Regime detection, sector analysis, macro calendar."""
+    _job_start = time.time()
     logger.info("=== JOB: Market Intelligence ===")
     try:
         from market_intelligence.regime_detector import detect_regime
@@ -199,20 +221,34 @@ def job_market_intelligence():
             # instead of always hardcoding "SPY below 200-day SMA"
             send_message(format_bear_market_alert(regime=regime))
 
-        logger.info("Market intelligence: regime=%s, aggression=%.2f",
-                    regime["regime"], regime["aggression_factor"])
+        # Sector stage2 summary
+        stage2_sectors = [s for s, d in sector_perf.items() if d.get("stage2")]
+        weak_sectors_log = [s for s, d in sector_perf.items()
+                            if not d.get("stage2") or d.get("3m_pct", 0) < 0]
+        logger.info("  Stage 2 sectors (%d): %s", len(stage2_sectors),
+                    ", ".join(stage2_sectors[:6]) + ("..." if len(stage2_sectors) > 6 else ""))
+        if weak_sectors_log:
+            logger.info("  Weak/non-Stage2 sectors: %s",
+                        ", ".join(weak_sectors_log[:4]))
+        logger.info("=== JOB: Market Intelligence DONE in %.1fs ===",
+                    time.time() - _job_start)
     except Exception as exc:
-        logger.error("Market intelligence failed: %s", exc, exc_info=True)
+        logger.error("Market intelligence failed after %.1fs: %s",
+                     time.time() - _job_start, exc, exc_info=True)
 
 
 def job_full_scan():
     """Run the complete screening pipeline: universe → trend → fundamentals → VCP."""
+    _job_start = time.time()
     logger.info("=== JOB: Full Scan ===")
     try:
         from main import run_full_scan
-        run_full_scan()
+        signals = run_full_scan()
+        logger.info("=== JOB: Full Scan DONE in %.1fs | signals=%d ===",
+                    time.time() - _job_start, len(signals) if signals else 0)
     except Exception as exc:
-        logger.error("Full scan failed: %s", exc, exc_info=True)
+        logger.error("Full scan failed after %.1fs: %s",
+                     time.time() - _job_start, exc, exc_info=True)
 
 
 def job_morning_briefing():
@@ -313,6 +349,7 @@ def job_intraday_check():
 
 def job_post_market():
     """21:15 BST — Update OHLCV, check stops, send daily summary."""
+    _job_start = time.time()
     logger.info("=== JOB: Post-Market ===")
     try:
         from risk.stop_manager import update_open_position_stops
@@ -321,6 +358,9 @@ def job_post_market():
         alerts = update_open_position_stops()
         for a in alerts:
             send_message(a["message"])
+            logger.info("  Stop alert sent: %s", a.get("ticker", "?"))
+        if not alerts:
+            logger.info("  No stops triggered today")
 
         now = datetime.now(BST).strftime("%Y-%m-%d")
         from database.db import get_connection
@@ -328,15 +368,25 @@ def job_post_market():
         today_signals = conn.execute(
             "SELECT COUNT(*) as cnt FROM signals WHERE date=?", (now,)
         ).fetchone()["cnt"]
+        watchlist_cnt = conn.execute(
+            "SELECT COUNT(*) as cnt FROM watchlist"
+        ).fetchone()["cnt"]
         conn.close()
+
+        logger.info("  Day summary: signals=%d watchlist=%d stops_triggered=%d",
+                    today_signals, watchlist_cnt, len(alerts))
 
         send_message(
             f"📊 Post-Market Summary — {now}\n"
             f"Signals generated today: {today_signals}\n"
+            f"Watchlist size: {watchlist_cnt}\n"
+            f"Stops triggered: {len(alerts)}\n"
             f"System running normally ✅"
         )
+        logger.info("=== JOB: Post-Market DONE in %.1fs ===", time.time() - _job_start)
     except Exception as exc:
-        logger.error("Post-market job failed: %s", exc, exc_info=True)
+        logger.error("Post-market job failed after %.1fs: %s",
+                     time.time() - _job_start, exc, exc_info=True)
 
 
 def job_weekly():
