@@ -35,9 +35,18 @@ def detect_regime(
     Returns regime dict including diagnostic fields for full audit trail.
     """
     cache_key = "regime:latest"
-    cached = cache_get(cache_key)
-    if cached is not None:
-        return cached
+    # Skip cache if caller supplies fresh breadth data — that reading is
+    # authoritative and must NOT be overridden by a stale cached value.
+    # The dashboard starts as a separate process and calls detect_regime()
+    # without breadth, populating the cache BEFORE the scanner's first full
+    # scan (which has fresh breadth).  Without this bypass the scanner's
+    # breadth_pct argument is silently discarded → Breadth always shows 0.
+    # Cache is still used for quick lookups that lack breadth data
+    # (dashboard, intraday checks).
+    if breadth_pct is None:
+        cached = cache_get(cache_key)
+        if cached is not None:
+            return cached
 
     if spy_df is None:
         spy_df = fetch_ohlcv("SPY", "2y")

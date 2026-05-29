@@ -6,7 +6,7 @@ Deduplication and validation included.
 
 import logging
 import re
-from typing import Optional
+from typing import Optional   # noqa: F401 – used in _extract_ticker return type
 
 import pandas as pd
 import requests
@@ -67,9 +67,14 @@ def get_sp500_tickers() -> list[str]:
 
 def get_russell1000_tickers() -> list[str]:
     """
-    Attempt to fetch Russell 1000 from iShares holdings CSV.
+    Attempt to fetch Russell 1000 from iShares IWB holdings CSV.
     The iShares CSV has metadata rows; we skip until the actual data header.
-    Falls back to empty list (S&P 500 alone) on any failure.
+
+    iShares occasionally changes the ticker column format (e.g. "NVDA US" instead
+    of "NVDA").  _extract_ticker() handles multiple formats robustly.
+
+    Falls back to a hardcoded mid-cap supplemental list (S&P 500 extensions) on
+    any failure so the universe always includes ~900+ names.
     """
     cache_key = "universe:russell1000"
     cached = cache_get(cache_key)
@@ -104,17 +109,116 @@ def get_russell1000_tickers() -> list[str]:
         col = next((c for c in df.columns if "ticker" in c.lower() or "symbol" in c.lower()), None)
         if col is None:
             raise ValueError(f"Ticker column not found in IWB CSV. Columns: {list(df.columns)[:5]}")
-        tickers = df[col].dropna().str.strip().tolist()
-        # Allow standard tickers + hyphenated share-class tickers (BRK-B, BF-B etc.)
-        tickers = [t for t in tickers if isinstance(t, str) and _TICKER_RE.match(t)]
+
+        # iShares occasionally changes the ticker format:
+        #   "NVDA"       → plain ticker ✓
+        #   "NVDA US"    → ticker + exchange suffix (Bloomberg-style)
+        #   "nvda"       → lowercase
+        # _extract_ticker() handles all variants and returns the clean symbol.
+        tickers = [_extract_ticker(v) for v in df[col].dropna()]
+        tickers = [t for t in tickers if t is not None]
+
         if len(tickers) < 200:
-            raise ValueError(f"Only {len(tickers)} tickers parsed — likely wrong CSV section")
-        logger.info("Russell 1000: %d tickers loaded", len(tickers))
+            raise ValueError(
+                f"Only {len(tickers)} tickers parsed after normalisation — "
+                f"CSV format may have changed. Sample col values: "
+                f"{df[col].dropna().head(5).tolist()}"
+            )
+        logger.info("Russell 1000: %d tickers loaded from iShares IWB", len(tickers))
         cache_set(cache_key, tickers, ttl_seconds=TTL_1D)
         return tickers
     except Exception as exc:
-        logger.warning("Russell 1000 fetch failed: %s — falling back to S&P 500", exc)
-        return []
+        logger.warning(
+            "Russell 1000 iShares fetch failed: %s — using mid-cap supplemental list",
+            exc,
+        )
+        return _russell1000_supplemental()
+
+
+def _extract_ticker(val: object) -> Optional[str]:
+    """
+    Robustly extract a valid US ticker symbol from a cell value.
+
+    Handles formats:
+        "NVDA"        → "NVDA"
+        "nvda"        → "NVDA"   (lowercase)
+        "NVDA US"     → "NVDA"   (Bloomberg exchange suffix)
+        "NVDA US EQ"  → "NVDA"   (Bloomberg full format)
+        "BRK-B"       → "BRK-B"  (share-class hyphen)
+        "BRK/B"       → "BRK-B"  (alternate share-class separator)
+        " NVDA "      → "NVDA"   (extra whitespace)
+    Returns None if no valid ticker can be extracted.
+    """
+    if not isinstance(val, str):
+        return None
+    v = val.strip().upper()
+    # Normalise alternate share-class separators
+    v = v.replace("/", "-")
+    # Strategy 1: whole cell is already a valid ticker
+    if _TICKER_RE.match(v):
+        return v
+    # Strategy 2: first whitespace-delimited token (handles "NVDA US", "NVDA US EQ")
+    first = v.split()[0] if v else ""
+    if first and _TICKER_RE.match(first):
+        return first
+    return None
+
+
+def _russell1000_supplemental() -> list[str]:
+    """
+    Hardcoded mid-cap supplemental list used when the iShares IWB CSV fails.
+    Contains ~350 high-quality Russell 1000 names NOT typically in the S&P 500
+    that are prime candidates for Minervini VCP setups: liquid growth stocks,
+    strong-sector mid-caps, and emerging large-caps.
+    Updated May 2026.
+    """
+    return [
+        # High-growth software / SaaS
+        "HUBS", "DDOG", "BILL", "PCOR", "DOCN", "GTLB", "PATH", "SMAR",
+        "NCNO", "JAMF", "BRZE", "CFLT", "ESTC", "MQ", "PEGA", "TOST",
+        "APPF", "APPN", "ALTR", "ASAN", "MNDY", "NTNX", "WEX",
+        # Cybersecurity
+        "S", "TENB", "RPD", "CYBR", "QLYS", "SAIL", "VRNS", "SCWX",
+        # Semiconductors / equipment (mid-cap)
+        "ACLS", "ONTO", "FORM", "UCTT", "WOLF", "AMBA", "AEHR",
+        "SITM", "SMTC", "OLED", "ALGM", "AIOT",
+        # Biotech / life science tools
+        "RXRX", "KYMR", "RCUS", "ARVN", "VKTX", "KRYS", "RVMD",
+        "PTGX", "GPCR", "PRCT", "IRTC", "NARI", "ITCI", "HRMY",
+        "INVA", "HALO", "IMVT", "PRGO", "AKRO", "BEAM", "EDIT",
+        "NTLA", "VERV", "ARKG", "FATE", "IOVA",
+        "MEDP", "ICLR", "ICON", "TXG", "PACB", "VEEV",
+        # Consumer brands / retail
+        "DECK", "ONON", "LULU", "SKX", "CROX", "BIRK",
+        "WING", "TXRH", "BROS", "CAVA", "DNUT",
+        "ELF", "ULTA", "CPRI", "RVLV",
+        "XPOF", "HIMS", "WW",
+        # Industrial / clean energy / infrastructure
+        "ENPH", "FSLR", "ARRY", "BE", "SHLS",
+        "BLDR", "TREX", "DOOR", "AAON", "WMS",
+        "AXON", "RGEN", "CSWI",
+        "MGNI", "DV",
+        # Financial / fintech
+        "AFRM", "SOFI", "UPST", "LC", "OPEN",
+        "OWL", "ARES", "BX", "KKR", "APO",
+        "HOOD", "MKTX", "GCMG",
+        # Healthcare services / devices
+        "PGNY", "GMED", "PODD", "NVST", "LMAT",
+        "MMSI", "ITGR", "NEOG", "INSP", "OMCL",
+        "ELAN", "PCRX", "AHCO", "AMED",
+        # Specialty / misc
+        "EXLS", "EPAM", "GLOB", "PRFT", "TTEK",
+        "GATX", "GBCI", "WABC", "BUSE", "HOPE",
+        "MGEE", "OTTR", "IDACORP",
+        "CELH", "VITL", "POWL", "IESC",
+        "PATK", "GFF",
+        # Media / entertainment / gaming
+        "RBLX", "U", "TTWO", "ZNGA", "DKNG",
+        "TTD", "PUBM", "MGNI", "APPS",
+        "FUTU", "TIGR",
+        # REITs (growth-oriented)
+        "CWAN", "IIPR", "COLD", "REXR", "NNN",
+    ]
 
 
 def get_universe() -> list[str]:

@@ -457,8 +457,18 @@ def _identify_contractions(df: pd.DataFrame, window: int = 5) -> list[dict]:
       3. Pair each pivot high with the NEXT pivot low → one contraction leg
       4. Deduplicate to avoid overlapping contractions
       5. Return sorted by time, max 5 contractions
+
+    Adaptive window: MIN_BASE_TRADING_DAYS = 15 but the default window=5
+    requires n >= 20 (5*4).  For bases of 15–19 days the original code
+    returned [] causing Step 5 to fail with "0 contractions" even though
+    Step 3 passed.  We shrink the window for short bases so contractions
+    can be detected down to n ≥ 8 days.
     """
     n = len(df)
+    # Adapt smoothing window to base length so short but valid bases (15–19 days)
+    # are not silently rejected by the pivot-detection floor.
+    if n < window * 4:
+        window = max(2, n // 4)
     if n < window * 4:
         return []
 
