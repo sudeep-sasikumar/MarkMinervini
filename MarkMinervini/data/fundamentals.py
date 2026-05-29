@@ -11,7 +11,14 @@ Caching:
                             re-fetched so yfinance can succeed after a redeploy.
 
 SECURITY: Finnhub API token is NEVER included in log messages (only status codes).
+
+Code version: fund-v5
+Changes in v5: case-insensitive income-stmt label matching; t.earnings Step 3 fallback;
+               deployment sentinel log so we can confirm which version is running.
 """
+
+# Bumped on every fix — logged once on first run to confirm deployment.
+_CODE_VERSION = "fund-v5"
 
 import logging
 import threading
@@ -27,6 +34,14 @@ from data.cache import get as cache_get, set as cache_set, TTL_7D, TTL_1H
 logger = logging.getLogger(__name__)
 
 _AV_CALLS_TODAY = 0
+_version_logged = False  # emit _CODE_VERSION once so we can confirm deployment
+
+
+def _log_version_once() -> None:
+    global _version_logged
+    if not _version_logged:
+        logger.info("data.fundamentals code version: %s", _CODE_VERSION)
+        _version_logged = True
 
 # ---------------------------------------------------------------------------
 # Finnhub rate limiter — only used as fallback now that yfinance is primary.
@@ -136,6 +151,7 @@ def fetch_fundamentals(ticker: str) -> dict:
 
 
 def _build_fundamentals(ticker: str) -> dict:
+    _log_version_once()  # logs "data.fundamentals code version: fund-v5" once per process
     base: dict = {
         "ticker": ticker,
         "status": "unknown",
@@ -313,43 +329,84 @@ def _parse_income_stmt_yoy(df: "pd.DataFrame", base: dict, source: str) -> None:
                         Requires df.shape[1] >= 5.
     source="annual":    compare iloc[0] vs iloc[1] (most-recent FY vs prior FY).
                         Requires df.shape[1] >= 2. Annual is always reliable.
+
+    v5: case-insensitive fallback matching handles yfinance label-name drift and
+    non-standard income statements (banks, REITs, insurance companies).
     """
     offset = 4 if source == "quarterly" else 1
     if df.shape[1] <= offset:
         return
 
+    # Build a case-insensitive index map for fallback matching.
+    idx_lower = {s.lower(): s for s in df.index}
+
+    def _get_row(exact_labels, fallback_lower=()):
+        """Try exact labels first, then case-insensitive fallbacks. Returns usable Series or None."""
+        for label in exact_labels:
+            if label in df.index:
+                row = df.loc[label].dropna()
+                if len(row) > offset:
+                    return row
+                return None  # label matched but not enough data — stop searching
+        for fl in fallback_lower:
+            if fl in idx_lower:
+                row = df.loc[idx_lower[fl]].dropna()
+                if len(row) > offset:
+                    return row
+        return None
+
     # Revenue YoY
     if base["rev_growth_yoy"] is None:
-        for label in ("Total Revenue", "TotalRevenue", "Revenue"):
-            if label in df.index:
-                row = df.loc[label].dropna()
-                if len(row) > offset:
-                    curr = float(row.iloc[0])
-                    prior = float(row.iloc[offset])
-                    if prior != 0 and curr > 0:
-                        base["rev_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
-                break
+        rev_row = _get_row(
+            ("Total Revenue", "TotalRevenue", "Revenue"),
+            ("total revenue", "totalrevenue", "revenue", "net revenue",
+             "total net revenue", "net revenues",
+             # Banks / financials: interest income proxies
+             "net interest income", "total interest income", "interest and dividend income"),
+        )
+        if rev_row is not None:
+            curr = float(rev_row.iloc[0])
+            prior = float(rev_row.iloc[offset])
+            if prior != 0 and curr > 0:
+                base["rev_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
 
-    # EPS YoY — prefer Diluted EPS, fall back to Net Income as proxy
+    # EPS YoY — prefer per-share data, fall back to Net Income as proxy.
+    # Case-insensitive fallbacks handle label-name churn between yfinance versions
+    # and non-standard structures (financials, REITs, etc.).
     if base["eps_growth_yoy"] is None:
-        for label in ("Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
-                      "Net Income Common Stockholders", "Net Income", "NetIncome"):
-            if label in df.index:
-                row = df.loc[label].dropna()
-                if len(row) > offset:
-                    curr = float(row.iloc[0])
-                    prior = float(row.iloc[offset])
-                    if prior != 0:
-                        base["eps_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
-                break
+        eps_row = _get_row(
+            ("Diluted EPS", "DilutedEPS", "Basic EPS", "BasicEPS",
+             "Net Income Common Stockholders", "Net Income", "NetIncome"),
+            ("diluted eps", "basic eps",
+             "net income common stockholders",
+             "net income applicable to common shares",
+             "net income available to common shareholders",
+             "net income attributable to common shareholders",
+             "net income from continuing operations",
+             "income from continuing operations",
+             "net income including noncontrolling interests",
+             "net income",
+             "netincome",
+             "normalized income",
+             "net earnings"),
+        )
+        if eps_row is not None:
+            curr = float(eps_row.iloc[0])
+            prior = float(eps_row.iloc[offset])
+            if prior != 0:
+                base["eps_growth_yoy"] = round((curr - prior) / abs(prior) * 100, 1)
 
     # Gross margins (current and prior period)
-    gp_lbl = next((l for l in ("Gross Profit", "GrossProfit") if l in df.index), None)
-    rv_lbl = next((l for l in ("Total Revenue", "TotalRevenue", "Revenue") if l in df.index), None)
-    if gp_lbl and rv_lbl:
-        gp_row = df.loc[gp_lbl].dropna()
-        rv_row = df.loc[rv_lbl].dropna()
-        if len(rv_row) > 0 and float(rv_row.iloc[0]) != 0:
+    gp_row = _get_row(
+        ("Gross Profit", "GrossProfit"),
+        ("gross profit", "grossprofit"),
+    )
+    rv_row = _get_row(
+        ("Total Revenue", "TotalRevenue", "Revenue"),
+        ("total revenue", "revenue", "net revenue"),
+    )
+    if gp_row is not None and rv_row is not None:
+        if float(rv_row.iloc[0]) != 0:
             if base["gross_margin_current"] is None:
                 base["gross_margin_current"] = round(
                     float(gp_row.iloc[0]) / float(rv_row.iloc[0]) * 100, 1
@@ -370,7 +427,10 @@ def _yfinance_quarterly_growth(t, base: dict) -> None:
        yfinance only returns 4 quarters by default, so this often fails.
     2. Annual income stmt  (≥2 cols):  compare FY0 vs FY1 (prior fiscal year).
        Annual is ALWAYS available (2+ years) and fully satisfies Minervini's
-       EPS/Revenue growth criteria. This is the key fix for fundamentals=0/100.
+       EPS/Revenue growth criteria.
+    3. t.earnings (deprecated simple table) — older yfinance API still works on
+       many installs; provides clean Earnings + Revenue columns by fiscal year.
+       Catches stocks where income_stmt label names don't match any known variant.
     """
     try:
         # --- Step 1: Try quarterly (need ≥5 columns for proper same-quarter YoY) ---
@@ -402,8 +462,6 @@ def _yfinance_quarterly_growth(t, base: dict) -> None:
                         break
 
         # --- Step 2: Annual fallback — always has ≥2 fiscal years ---
-        # Triggered when quarterly has < 5 cols (the normal case with yfinance)
-        # or when quarterly data was missing EPS or revenue.
         if base["eps_growth_yoy"] is None or base["rev_growth_yoy"] is None:
             for attr in ("income_stmt", "financials"):
                 try:
@@ -413,7 +471,7 @@ def _yfinance_quarterly_growth(t, base: dict) -> None:
                         if base["eps_growth_yoy"] is not None or base["rev_growth_yoy"] is not None:
                             logger.debug(
                                 "Fundamentals %s: annual income stmt YoY fallback used "
-                                "(quarterly had <5 cols) eps=%s rev=%s",
+                                "eps=%s rev=%s",
                                 base.get("ticker"),
                                 f"{base['eps_growth_yoy']:+.1f}%" if base["eps_growth_yoy"] is not None else "n/a",
                                 f"{base['rev_growth_yoy']:+.1f}%" if base["rev_growth_yoy"] is not None else "n/a",
@@ -421,6 +479,42 @@ def _yfinance_quarterly_growth(t, base: dict) -> None:
                         break
                 except Exception:
                     pass
+
+        # --- Step 3: t.earnings (deprecated simple table, still widely available) ---
+        # Provides a clean DataFrame with "Earnings" and "Revenue" columns indexed
+        # by fiscal year — immune to income-statement label-name issues.
+        if base["eps_growth_yoy"] is None or base["rev_growth_yoy"] is None:
+            try:
+                e_df = getattr(t, "earnings", None)
+                if e_df is not None and not e_df.empty and len(e_df) >= 2:
+                    e_sorted = e_df.sort_index(ascending=False)
+                    if "Earnings" in e_sorted.columns and base["eps_growth_yoy"] is None:
+                        vals = e_sorted["Earnings"].dropna()
+                        if len(vals) >= 2:
+                            curr_e = float(vals.iloc[0])
+                            prior_e = float(vals.iloc[1])
+                            if prior_e != 0:
+                                base["eps_growth_yoy"] = round(
+                                    (curr_e - prior_e) / abs(prior_e) * 100, 1
+                                )
+                    if "Revenue" in e_sorted.columns and base["rev_growth_yoy"] is None:
+                        vals = e_sorted["Revenue"].dropna()
+                        if len(vals) >= 2:
+                            curr_r = float(vals.iloc[0])
+                            prior_r = float(vals.iloc[1])
+                            if prior_r != 0 and curr_r > 0:
+                                base["rev_growth_yoy"] = round(
+                                    (curr_r - prior_r) / abs(prior_r) * 100, 1
+                                )
+                    if base["eps_growth_yoy"] is not None or base["rev_growth_yoy"] is not None:
+                        logger.debug(
+                            "Fundamentals %s: t.earnings table fallback used eps=%s rev=%s",
+                            base.get("ticker"),
+                            f"{base['eps_growth_yoy']:+.1f}%" if base["eps_growth_yoy"] is not None else "n/a",
+                            f"{base['rev_growth_yoy']:+.1f}%" if base["rev_growth_yoy"] is not None else "n/a",
+                        )
+            except Exception:
+                pass
 
     except Exception as exc:
         logger.debug("_yfinance_quarterly_growth error for %s: %s",
