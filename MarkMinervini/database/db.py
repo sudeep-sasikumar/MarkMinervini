@@ -333,6 +333,47 @@ def remove_watchlist_ticker(ticker: str) -> None:
         conn.execute("DELETE FROM watchlist WHERE ticker=?", (ticker,))
 
 
+def set_scan_trigger() -> None:
+    """
+    Signal the scanner process to run a full scan immediately.
+    The scanner's 60-second heartbeat loop checks for this flag and fires
+    run_full_scan() when found.  Safe to call from the dashboard process.
+    """
+    with db_session() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO system_status(key, value, updated_at) "
+            "VALUES('scan_trigger', 'requested', CURRENT_TIMESTAMP)"
+        )
+
+
+def check_and_clear_scan_trigger() -> bool:
+    """
+    Atomically check for a pending scan trigger and claim it (mark as running).
+    Returns True if a trigger was found and claimed; False if none is pending.
+    Call clear_scan_trigger() when the triggered scan completes.
+    """
+    with db_session() as conn:
+        row = conn.execute(
+            "SELECT value FROM system_status WHERE key='scan_trigger'"
+        ).fetchone()
+        if row and row["value"] == "requested":
+            conn.execute(
+                "INSERT OR REPLACE INTO system_status(key, value, updated_at) "
+                "VALUES('scan_trigger', 'running', CURRENT_TIMESTAMP)"
+            )
+            return True
+    return False
+
+
+def clear_scan_trigger() -> None:
+    """Mark a dashboard-triggered scan as done so it is not re-triggered."""
+    with db_session() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO system_status(key, value, updated_at) "
+            "VALUES('scan_trigger', 'done', CURRENT_TIMESTAMP)"
+        )
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     init_db()

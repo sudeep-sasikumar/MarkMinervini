@@ -131,6 +131,15 @@ st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Force Regime Refresh", help="Clears cached regime, sector, and breadth data and recomputes from live market data."):
     _force_refresh_caches()
     st.rerun()
+
+if st.sidebar.button("🔍 Run Full Scan Now", help="Queues a full scan in the scanner process. Results appear on the next page refresh (~60–120 seconds)."):
+    try:
+        from database.db import set_scan_trigger
+        set_scan_trigger()
+        st.sidebar.success("✅ Scan queued! Refresh in ~60–120s.")
+    except Exception as _trig_exc:
+        st.sidebar.error(f"Failed to queue scan: {_trig_exc}")
+
 st.sidebar.caption(f"SEPA v3.0 | {date.today().isoformat()}")
 st.sidebar.caption(f"Dashboard port: {settings.DASHBOARD_PORT}")
 
@@ -553,7 +562,14 @@ if page == "🏠 Live Dashboard":
             except Exception:
                 st.caption("Near-pivot check skipped (live price unavailable)")
         elif watchlist_df.empty:
-            st.info("Watchlist is empty — run a full scan.")
+            st.info("Watchlist is empty — no VCP setups detected yet in current market conditions.")
+            if st.button("🔍 Run Full Scan Now", key="live_dash_scan_btn"):
+                try:
+                    from database.db import set_scan_trigger
+                    set_scan_trigger()
+                    st.success("✅ Scan queued! Refresh in ~60–120 seconds.")
+                except Exception as _e:
+                    st.error(f"Failed to queue scan: {_e}")
 
     # Auto-refresh via rerun
     time.sleep(settings.DASHBOARD_REFRESH_SECONDS)
@@ -598,15 +614,13 @@ elif page == "📋 Watchlist":
 
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    if st.button("🔄 Refresh Scan Now"):
-        with st.spinner("Running scan..."):
-            try:
-                from main import run_full_scan
-                signals = run_full_scan()
-                st.success(f"Scan complete! {len(signals)} new signals.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Scan failed: {e}")
+    if st.button("🔍 Run Full Scan Now"):
+        try:
+            from database.db import set_scan_trigger
+            set_scan_trigger()
+            st.success("✅ Scan queued in scanner process! Refresh this page in ~60–120 seconds to see updated results.")
+        except Exception as e:
+            st.error(f"Failed to queue scan: {e}")
 
 
 # ===========================================================================
@@ -833,18 +847,28 @@ elif page == "⚙️ System Status":
     # Scheduler next jobs (simplified — shows configured times)
     st.subheader("Scheduled Jobs (BST)")
     jobs_info = {
-        "data_refresh": "08:00 — Data refresh + RS + Breadth",
-        "market_intelligence": "09:00 — Regime + Sectors + Macro",
-        "full_scan_1": "11:00 — Full scan #1",
+        "startup": "On deploy — Initial full scan runs immediately at startup",
+        "data_refresh": "08:00 — Data refresh + RS ratings + Market breadth",
+        "market_intelligence": "09:00 — Regime detection + Sectors + Macro calendar",
+        "full_scan_1": "11:00 — Full scan #1 (Universe → TT → Fund → VCP)",
         "morning_briefing": "13:00 — Morning briefing (Telegram)",
-        "intraday": "13:30–21:00 every 15min — Intraday breakout check",
+        "intraday": "13:30–21:00 every 15min — Intraday breakout check (watchlist)",
         "full_scan_2": "15:30 — Full scan #2",
-        "full_scan_3": "19:00 — Full scan #3",
-        "post_market": "21:15 — Post-market wrap",
-        "weekly": "Sunday 10:00 — Weekly AI + backtest",
+        "full_scan_3": "19:00 — Full scan #3 (EOD)",
+        "post_market": "21:15 — Post-market wrap + Telegram summary",
+        "weekly": "Sunday 10:00 — Weekly AI management analysis",
     }
     for job_id, desc in jobs_info.items():
         st.text(f"  • {desc}")
+    st.caption("Watchlist is empty between market scans — this is expected when no VCP setups meet criteria.")
+    st.divider()
+    if st.button("🔍 Run Full Scan Now", key="status_scan_btn"):
+        try:
+            from database.db import set_scan_trigger
+            set_scan_trigger()
+            st.success("✅ Scan queued! Check the scan funnel log above in ~60–120 seconds.")
+        except Exception as _e:
+            st.error(f"Failed to queue scan: {_e}")
 
     st.divider()
 

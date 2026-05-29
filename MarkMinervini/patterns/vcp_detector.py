@@ -112,6 +112,24 @@ def detect_vcp(
         return base_result
 
     # ------------------------------------------------------------------
+    # Quality / breakout split
+    # Today's bar (potentially a breakout bar) must NOT influence VCP
+    # quality scoring.  A wide breakout bar triggers the wide-bar penalty
+    # (-15), and the elevated volume/range inflates the ATR ratio, dropping
+    # a valid setup below the watchlist threshold on the EXACT day the
+    # backtest (and live scanner) would want to enter.
+    #
+    # Rule:
+    #   quality_df  — data through YESTERDAY → base detection, contraction
+    #                 counting, ATR ratio, wide-bar check, volume dry-up,
+    #                 pivot price, stop/target levels.
+    #   today_bar   — TODAY's OHLCV only → gap-up filter (Step 11) and
+    #                 breakout confirmation (Step 12).
+    # ------------------------------------------------------------------
+    quality_df = df.iloc[:-1].copy()  # yesterday and earlier
+    today_bar  = df.iloc[-1]          # today's bar (a Series)
+
+    # ------------------------------------------------------------------
     # Step 1 — Trend Template must pass
     # ------------------------------------------------------------------
     if not trend_template_passes:
@@ -126,9 +144,9 @@ def detect_vcp(
     # Correctly measures advance BEFORE the base started, not including
     # the base itself.
     # ------------------------------------------------------------------
-    base_window = df.iloc[-settings.MAX_BASE_TRADING_DAYS:].copy()
+    base_window = quality_df.iloc[-settings.MAX_BASE_TRADING_DAYS:].copy()
     peak_pos = int(base_window["Close"].values.argmax())
-    base_start_idx = len(df) - settings.MAX_BASE_TRADING_DAYS + peak_pos
+    base_start_idx = len(quality_df) - settings.MAX_BASE_TRADING_DAYS + peak_pos
 
     # Pre-base window: look back up to 2 years before the base peak.
     # 504 trading days ≈ 2 years — necessary to capture the 2020-2021 bull run
@@ -136,7 +154,7 @@ def detect_vcp(
     # "prior advance 0%" failures for virtually every stock in the backtest period.
     pre_base_lookback = min(504, base_start_idx)
     pre_base_start = max(0, base_start_idx - pre_base_lookback)
-    pre_base_df = df.iloc[pre_base_start:base_start_idx]
+    pre_base_df = quality_df.iloc[pre_base_start:base_start_idx]
 
     if len(pre_base_df) < 20:
         base_result["rejection_reason"] = "Step 2: Insufficient pre-base history to confirm prior advance"
@@ -263,7 +281,7 @@ def detect_vcp(
     # Step 8 — Volume dry-up in final 5 days
     # ------------------------------------------------------------------
     final5 = base_df.iloc[-settings.VOLUME_DRY_UP_DAYS:]
-    avg_vol_50 = float(df["Volume"].iloc[-50:].mean())
+    avg_vol_50 = float(quality_df["Volume"].iloc[-50:].mean())
     dry_up_days = int((final5["Volume"] < avg_vol_50).sum())
     steps["volume_dry_up_days"] = dry_up_days
     if dry_up_days < 3:
@@ -286,7 +304,7 @@ def detect_vcp(
         steps["rs_line_new_high"] = True
 
     # Pocket pivot bonus — reward stocks showing institutional demand during the base
-    pp_result = _check_pocket_pivot_bonus(ticker, df)
+    pp_result = _check_pocket_pivot_bonus(ticker, quality_df)
     if pp_result:
         score += settings.POCKET_PIVOT_BONUS
         steps["pocket_pivot_bonus"] = True
@@ -331,9 +349,9 @@ def detect_vcp(
         return base_result
 
     # ------------------------------------------------------------------
-    # Step 11 — Gap-up filter
+    # Step 11 — Gap-up filter (uses today's bar)
     # ------------------------------------------------------------------
-    today_open = float(df["Open"].iloc[-1])
+    today_open = float(today_bar["Open"])
     gap_up = today_open > pivot_price * (1 + settings.GAP_UP_MAX)
     steps["gap_up"] = gap_up
     if gap_up:
@@ -347,11 +365,13 @@ def detect_vcp(
         return base_result
 
     # ------------------------------------------------------------------
-    # Step 12 — Breakout confirmation
+    # Step 12 — Breakout confirmation (uses today's bar)
     # REQUIRED for alert=True — price must close > pivot on >= 1.4× volume
+    # pivot_price is computed from quality_df (through yesterday), so
+    # today_close > pivot_price is not mathematically impossible.
     # ------------------------------------------------------------------
-    today_close = float(df["Close"].iloc[-1])
-    today_vol = float(df["Volume"].iloc[-1])
+    today_close = float(today_bar["Close"])
+    today_vol   = float(today_bar["Volume"])
     breakout = (today_close > pivot_price) and (today_vol >= avg_vol_50 * settings.BREAKOUT_VOLUME_RATIO)
     if breakout:
         score += 5
@@ -361,8 +381,8 @@ def detect_vcp(
     base_result["breakout_confirmed"] = breakout
 
     # Anti-false-positive liquidity gates
-    avg_dollar_vol = avg_vol_50 * float(df["Close"].iloc[-50:].mean())
-    price = float(df["Close"].iloc[-1])
+    avg_dollar_vol = avg_vol_50 * float(quality_df["Close"].iloc[-50:].mean())
+    price = float(today_bar["Close"])
 
     if avg_vol_50 < settings.MIN_DAILY_VOLUME:
         base_result["rejection_reason"] = (

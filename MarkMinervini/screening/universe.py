@@ -174,28 +174,33 @@ def _russell1000_supplemental() -> list[str]:
     """
     return [
         # High-growth software / SaaS
-        "HUBS", "DDOG", "BILL", "PCOR", "DOCN", "GTLB", "PATH", "SMAR",
+        # Removed: SMAR (Smartsheet, taken private 2024), ALTR (Altair, acq. SoftBank 2025)
+        "HUBS", "DDOG", "BILL", "PCOR", "DOCN", "GTLB", "PATH",
         "NCNO", "JAMF", "BRZE", "CFLT", "ESTC", "MQ", "PEGA", "TOST",
-        "APPF", "APPN", "ALTR", "ASAN", "MNDY", "NTNX", "WEX",
+        "APPF", "APPN", "ASAN", "MNDY", "NTNX", "WEX",
         # Cybersecurity
-        "S", "TENB", "RPD", "CYBR", "QLYS", "SAIL", "VRNS", "SCWX",
+        # Removed: SCWX (SecureWorks, acq. 2023)
+        "S", "TENB", "RPD", "CYBR", "QLYS", "SAIL", "VRNS",
         # Semiconductors / equipment (mid-cap)
         "ACLS", "ONTO", "FORM", "UCTT", "WOLF", "AMBA", "AEHR",
         "SITM", "SMTC", "OLED", "ALGM", "AIOT",
         # Biotech / life science tools
         "RXRX", "KYMR", "RCUS", "ARVN", "VKTX", "KRYS", "RVMD",
-        "PTGX", "GPCR", "PRCT", "IRTC", "NARI", "ITCI", "HRMY",
+        # Removed: ITCI (Intra-Cellular, acq. J&J 2025)
+        "PTGX", "GPCR", "PRCT", "IRTC", "NARI", "HRMY",
         "INVA", "HALO", "IMVT", "PRGO", "AKRO", "BEAM", "EDIT",
         "NTLA", "VERV", "ARKG", "FATE", "IOVA",
         "MEDP", "ICLR", "ICON", "TXG", "PACB", "VEEV",
         # Consumer brands / retail
-        "DECK", "ONON", "LULU", "SKX", "CROX", "BIRK",
+        # Removed: SKX (Skechers, taken private 3G Capital 2025)
+        "DECK", "ONON", "LULU", "CROX", "BIRK",
         "WING", "TXRH", "BROS", "CAVA", "DNUT",
         "ELF", "ULTA", "CPRI", "RVLV",
         "XPOF", "HIMS", "WW",
         # Industrial / clean energy / infrastructure
         "ENPH", "FSLR", "ARRY", "BE", "SHLS",
-        "BLDR", "TREX", "DOOR", "AAON", "WMS",
+        # Removed: DOOR (Masonite, acq. Owens Corning 2024)
+        "BLDR", "TREX", "AAON", "WMS",
         "AXON", "RGEN", "CSWI",
         "MGNI", "DV",
         # Financial / fintech
@@ -205,16 +210,20 @@ def _russell1000_supplemental() -> list[str]:
         # Healthcare services / devices
         "PGNY", "GMED", "PODD", "NVST", "LMAT",
         "MMSI", "ITGR", "NEOG", "INSP", "OMCL",
-        "ELAN", "PCRX", "AHCO", "AMED",
+        # Removed: AMED (Amedisys, acq. UnitedHealth/Optum 2023)
+        "ELAN", "PCRX", "AHCO",
         # Specialty / misc
-        "EXLS", "EPAM", "GLOB", "PRFT", "TTEK",
+        # Removed: PRFT (Perficient, acq. EQT 2023)
+        "EXLS", "EPAM", "GLOB", "TTEK",
         "GATX", "GBCI", "WABC", "BUSE", "HOPE",
-        "MGEE", "OTTR", "IDACORP",
+        # Fixed: IDACORP → IDA (correct NYSE ticker for IDACORP Inc.)
+        "MGEE", "OTTR", "IDA",
         "CELH", "VITL", "POWL", "IESC",
         "PATK", "GFF",
         # Media / entertainment / gaming
-        "RBLX", "U", "TTWO", "ZNGA", "DKNG",
-        "TTD", "PUBM", "MGNI", "APPS",
+        # Removed: ZNGA (Zynga, acq. Take-Two 2022); MGNI already in Industrial section
+        "RBLX", "U", "TTWO", "DKNG",
+        "TTD", "PUBM", "APPS",
         "FUTU", "TIGR",
         # REITs (growth-oriented)
         "CWAN", "IIPR", "COLD", "REXR", "NNN",
@@ -304,14 +313,14 @@ def _sp500_fallback() -> list[str]:
         "AXON", "TASER", "SAIC", "GRMN", "GNSS",
         "WST", "PODD", "NEOG", "MMSI", "ITGR",
         "OLED", "ACLS", "FORM", "UCTT", "ONTO",
-        "DECK", "LULU", "SKX", "ONON", "CROX",
+        "DECK", "LULU", "ONON", "CROX",  # SKX taken private 2025
         "WING", "TXRH", "BROS", "CAVA",
         "ELF", "ULTA", "CPRI", "TPR", "RL",
         "GNRC", "TREX", "PGNY", "GMED", "HIMS",
         "CELH", "VITL", "PRCT", "IRTC", "NARI",
         "GFF", "GATX", "GBCI", "CSWI",
         "MGNI", "PUBM", "APPS", "DV",
-        "HRMY", "ITCI", "PRGO", "AMPH",
+        "HRMY", "PRGO", "AMPH",  # ITCI acq. J&J 2025
         "AGIO", "ACAD", "SWTX", "RVMD",
         "MEDP", "ICLR", "SYNEOS", "PRA",
     ]

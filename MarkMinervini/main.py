@@ -872,11 +872,19 @@ def main():
     logger.info("Running initial scan on startup...")
     run_full_scan()
 
-    # Keep alive — write heartbeat every 60s so dashboard can detect stale scanner
+    # Keep alive — write heartbeat every 60s; also services dashboard-triggered scans.
+    # The dashboard writes 'scan_trigger=requested' to system_status; we pick it up
+    # here and run a full scan without waiting for the next scheduled slot.
     try:
+        from database.db import check_and_clear_scan_trigger, clear_scan_trigger
         while True:
             time.sleep(60)
             _write_heartbeat()
+            if check_and_clear_scan_trigger():
+                logger.info("Dashboard scan trigger detected — running on-demand full scan")
+                run_full_scan()
+                clear_scan_trigger()
+                logger.info("On-demand scan complete")
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutdown signal received — stopping scheduler")
         scheduler.shutdown(wait=False)
