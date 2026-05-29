@@ -1,6 +1,7 @@
 services:
   sepa-system:
     image: ghcr.io/sudeep-sasikumar/markminervini:latest
+    pull_policy: always            # always pull latest image on every deploy — never use stale local cache
     container_name: minervini_sepa
     restart: always
     ports:
