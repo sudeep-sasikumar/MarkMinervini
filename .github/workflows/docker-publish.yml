@@ -77,12 +77,10 @@ jobs:
             ghcr.io/sudeep-sasikumar/markminervini:latest
             ghcr.io/sudeep-sasikumar/markminervini:${{ github.sha }}
           platforms: linux/amd64,linux/arm64
+          no-cache: true
           build-args: |
             GIT_COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.date.outputs.date }}
-            CACHE_BUST=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Image digest
         run: echo "Pushed ghcr.io/sudeep-sasikumar/markminervini:latest (${{ github.sha }})"

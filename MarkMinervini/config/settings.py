@@ -41,8 +41,11 @@ POCKET_PIVOT_BONUS = 5          # VCP score bonus if pocket pivot confirmed in l
 CONTRACTION_TIGHTENING_RATIO = 0.90  # each contraction must be < prev * 0.90 (10% tighter minimum)
 MIN_CONTRACTIONS = 2
 PIVOT_ZONE_DAYS = 15            # last N days define the pivot zone
-PIVOT_ATR_TIGHT_RATIO = 0.35    # ATR-14 / ATR-50 < this = tight (Score +25)
-PIVOT_ATR_VERY_TIGHT_RATIO = 0.25  # even tighter (Score +10 bonus)
+PIVOT_ATR_TIGHT_RATIO = 0.75    # ATR-14 / ATR-50 < this = tight (Score +25)
+# Any 25%+ reduction in ATR during the pivot zone vs. the full base qualifies.
+# Old threshold of 0.35 required a 65%+ collapse — essentially impossible for
+# real stocks, causing 0 ATR score for every VCP and vcp_wc=0 in all backtest windows.
+PIVOT_ATR_VERY_TIGHT_RATIO = 0.50  # 50%+ ATR reduction = very tight (Score +35)
 VOLUME_DRY_UP_DAYS = 5          # final days to check for volume dry-up
 BREAKOUT_VOLUME_RATIO = 1.4     # volume must be >= 1.4× 50-day avg on breakout
 BREAKOUT_STRONG_VOLUME = 2.0    # >= 2.0× = strong institutional confirmation
