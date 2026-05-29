@@ -174,22 +174,25 @@ def _russell1000_supplemental() -> list[str]:
     """
     return [
         # High-growth software / SaaS
-        # Removed: SMAR (Smartsheet, taken private 2024), ALTR (Altair, acq. SoftBank 2025)
+        # Removed: SMAR (taken private 2024), ALTR (acq. SoftBank 2025)
+        #          JAMF (taken private Francisco Partners 2023), CFLT (Confluent, delisted 2025)
         "HUBS", "DDOG", "BILL", "PCOR", "DOCN", "GTLB", "PATH",
-        "NCNO", "JAMF", "BRZE", "CFLT", "ESTC", "MQ", "PEGA", "TOST",
+        "NCNO", "BRZE", "ESTC", "MQ", "PEGA", "TOST",
         "APPF", "APPN", "ASAN", "MNDY", "NTNX", "WEX",
         # Cybersecurity
-        # Removed: SCWX (SecureWorks, acq. 2023)
-        "S", "TENB", "RPD", "CYBR", "QLYS", "SAIL", "VRNS",
+        # Removed: SCWX (SecureWorks, acq. 2023), CYBR (CyberArk, ticker change 2025)
+        "S", "TENB", "RPD", "QLYS", "SAIL", "VRNS",
         # Semiconductors / equipment (mid-cap)
-        "ACLS", "ONTO", "FORM", "UCTT", "WOLF", "AMBA", "AEHR",
+        # Removed: WOLF (Wolfspeed, bankruptcy/delisted 2025)
+        "ACLS", "ONTO", "FORM", "UCTT", "AMBA", "AEHR",
         "SITM", "SMTC", "OLED", "ALGM", "AIOT",
         # Biotech / life science tools
         "RXRX", "KYMR", "RCUS", "ARVN", "VKTX", "KRYS", "RVMD",
-        # Removed: ITCI (Intra-Cellular, acq. J&J 2025)
-        "PTGX", "GPCR", "PRCT", "IRTC", "NARI", "HRMY",
-        "INVA", "HALO", "IMVT", "PRGO", "AKRO", "BEAM", "EDIT",
-        "NTLA", "VERV", "ARKG", "FATE", "IOVA",
+        # Removed: ITCI (acq. J&J 2025), NARI (Inari Medical, acq. BD 2024)
+        #          AKRO (Akero Therapeutics, acquired 2025), VERV (Verve Therapeutics, acquired 2025)
+        "PTGX", "GPCR", "PRCT", "IRTC", "HRMY",
+        "INVA", "HALO", "IMVT", "PRGO", "BEAM", "EDIT",
+        "NTLA", "ARKG", "FATE", "IOVA",
         "MEDP", "ICLR", "ICON", "TXG", "PACB", "VEEV",
         # Consumer brands / retail
         # Removed: SKX (Skechers, taken private 3G Capital 2025)
@@ -201,7 +204,8 @@ def _russell1000_supplemental() -> list[str]:
         "ENPH", "FSLR", "ARRY", "BE", "SHLS",
         # Removed: DOOR (Masonite, acq. Owens Corning 2024)
         "BLDR", "TREX", "AAON", "WMS",
-        "AXON", "RGEN", "CSWI",
+        # Removed: CSWI (CSW Industrials, acquired 2025)
+        "AXON", "RGEN",
         "MGNI", "DV",
         # Financial / fintech
         "AFRM", "SOFI", "UPST", "LC", "OPEN",
@@ -307,22 +311,22 @@ def _sp500_fallback() -> list[str]:
         "ENPH", "FSLR", "SEDG", "ARRY", "BE", "RUN", "SHLS",
         "PAYC", "PAYX", "ADP", "SAIC", "LDOS", "CACI", "BAH",
         "BLDR", "MLM", "VMC", "EXP", "SUM", "USCR",
-        "CSGP", "COSTAR", "MSCI", "SPGI", "FactSet",
+        "CSGP", "MSCI", "SPGI", "FDS",  # COSTAR→CSGP already; FactSet→FDS; TASER→AXON
         "ROP", "IDEX", "FICO", "VEEV", "HUBS", "BILL", "PCOR",
         "TTD", "RBLX", "U", "MTCH",
-        "AXON", "TASER", "SAIC", "GRMN", "GNSS",
+        "AXON", "GRMN",
         "WST", "PODD", "NEOG", "MMSI", "ITGR",
         "OLED", "ACLS", "FORM", "UCTT", "ONTO",
         "DECK", "LULU", "ONON", "CROX",  # SKX taken private 2025
         "WING", "TXRH", "BROS", "CAVA",
         "ELF", "ULTA", "CPRI", "TPR", "RL",
         "GNRC", "TREX", "PGNY", "GMED", "HIMS",
-        "CELH", "VITL", "PRCT", "IRTC", "NARI",
-        "GFF", "GATX", "GBCI", "CSWI",
+        "CELH", "VITL", "PRCT", "IRTC",  # NARI acq. BD 2024
+        "GFF", "GATX", "GBCI",           # CSWI acquired 2025
         "MGNI", "PUBM", "APPS", "DV",
         "HRMY", "PRGO", "AMPH",  # ITCI acq. J&J 2025
         "AGIO", "ACAD", "SWTX", "RVMD",
-        "MEDP", "ICLR", "SYNEOS", "PRA",
+        "MEDP", "ICLR",  # SYNEOS taken private KKR 2023
     ]
 
 
