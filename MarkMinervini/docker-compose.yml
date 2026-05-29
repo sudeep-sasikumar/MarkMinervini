@@ -7,8 +7,10 @@ services:
     ports:
       - "8501:8501"          # Streamlit dashboard
     volumes:
-      - sepa_data:/app/data  # SQLite database persists across restarts
-      - sepa_logs:/app/logs  # Logs persist across restarts
+      - sepa_data:/app/data/db  # SQLite DB only — /app/data/db/sepa.db
+      - sepa_logs:/app/logs     # Logs persist across restarts
+      # IMPORTANT: mount is at /app/data/db/ (not /app/data/) so the volume
+      # never overlays the Python source files in /app/data/*.py
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}

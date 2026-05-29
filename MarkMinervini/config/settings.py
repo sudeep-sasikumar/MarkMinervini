@@ -153,7 +153,7 @@ DASHBOARD_REFRESH_SECONDS = 60
 # ---------------------------------------------------------------------------
 # Database / Logging
 # ---------------------------------------------------------------------------
-DB_PATH = os.getenv("DB_PATH", "/app/data/sepa.db")
+DB_PATH = os.getenv("DB_PATH", "/app/data/db/sepa.db")  # /app/data/db/ is volume-mounted (not /app/data/)
 LOG_PATH = os.getenv("LOG_PATH", "/app/logs/sepa.log")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 

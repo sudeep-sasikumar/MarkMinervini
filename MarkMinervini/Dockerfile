@@ -22,8 +22,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Application code — always rebuilt fresh (no-cache: true in GHA workflow).
 COPY . .
 
-# Create data and logs directories for SQLite persistence
-RUN mkdir -p /app/data /app/logs
+# Create database subdirectory and logs for persistence.
+# Volume is mounted at /app/data/db/ (NOT /app/data/) so Python source files
+# in /app/data/*.py are never shadowed by stale volume contents.
+RUN mkdir -p /app/data/db /app/logs
 
 # Copy the process supervisor script
 COPY docker-entrypoint.sh /docker-entrypoint.sh
