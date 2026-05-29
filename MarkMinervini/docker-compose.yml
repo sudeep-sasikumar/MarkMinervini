@@ -20,7 +20,7 @@ services:
       - RISK_PER_TRADE_PCT=${RISK_PER_TRADE_PCT:-0.015}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
-      - DB_PATH=/app/data/sepa.db
+      - DB_PATH=/app/data/db/sepa.db
       - LOG_PATH=/app/logs/sepa.log
     depends_on:
       ollama:

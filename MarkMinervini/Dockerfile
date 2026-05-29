@@ -27,6 +27,15 @@ COPY . .
 # in /app/data/*.py are never shadowed by stale volume contents.
 RUN mkdir -p /app/data/db /app/logs
 
+# Self-healing source backup — immune to volume shadowing.
+# /app/data_bak/ is NEVER volume-mounted, so it always holds the current
+# image's Python files.  docker-entrypoint.sh copies them back to /app/data/
+# at every container start, overriding any stale files a named volume may
+# have deposited there (a known Hostinger deployment quirk).
+RUN mkdir -p /app/data_bak && \
+    find /app/data -maxdepth 1 -name "*.py" -exec cp {} /app/data_bak/ \; && \
+    echo "Backed up $(ls /app/data_bak/*.py 2>/dev/null | wc -l) Python files to /app/data_bak/"
+
 # Copy the process supervisor script
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh

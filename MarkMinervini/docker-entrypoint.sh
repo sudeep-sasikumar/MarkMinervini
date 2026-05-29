@@ -7,6 +7,23 @@
 
 set -e
 
+# ---------------------------------------------------------------------------
+# Self-healing source restore
+# ---------------------------------------------------------------------------
+# /app/data_bak/ is baked into the image (never volume-mounted) and always
+# contains the latest Python source files from the build.  If a named volume
+# is mounted at /app/data/ (e.g. by an old Hostinger docker-compose.yml that
+# hasn't been updated), stale .py files in that volume would shadow the fresh
+# code in the image.  Copying from the backup here — before any Python process
+# starts — guarantees the container ALWAYS runs the current image's code,
+# regardless of whatever the host's docker-compose.yml specifies.
+if [ -d /app/data_bak ] && ls /app/data_bak/*.py >/dev/null 2>&1; then
+    cp -f /app/data_bak/*.py /app/data/
+    echo "Source restore: copied fresh data/*.py from image backup (/app/data_bak/)"
+else
+    echo "Source restore: /app/data_bak/ not found or empty — skipping"
+fi
+
 echo "Starting Minervini SEPA scanner..."
 python main.py &
 MAIN_PID=$!
