@@ -138,6 +138,74 @@ CREATE TABLE IF NOT EXISTS system_status (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- ---------------------------------------------------------------------------
+-- India market tables — mirror of the US tables but scoped to NSE equities.
+-- Kept separate so India and US results never mix in queries.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS india_watchlist (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker              TEXT UNIQUE NOT NULL,
+    company_name        TEXT,
+    sector              TEXT,
+    added_date          TEXT,
+    vcp_score           INTEGER,
+    grade               TEXT,
+    pivot_price         REAL,
+    entry_price         REAL,
+    stop_price          REAL,
+    stop_pct            REAL,
+    target_1            REAL,
+    target_2            REAL,
+    base_days           INTEGER,
+    rs_rating           REAL,
+    rs_line_new_high    INTEGER DEFAULT 0,
+    eps_growth          REAL,
+    rev_growth          REAL,
+    fundamentals_score  INTEGER,
+    breakout_confirmed  INTEGER DEFAULT 0,
+    last_updated        DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS india_signals (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker              TEXT NOT NULL,
+    date                TEXT NOT NULL,
+    signal_type         TEXT,
+    vcp_score           INTEGER,
+    pivot_price         REAL,
+    entry_price         REAL,
+    stop_price          REAL,
+    stop_pct            REAL,
+    target_1            REAL,
+    target_2            REAL,
+    rs_rating           REAL,
+    eps_growth          REAL,
+    rev_growth          REAL,
+    sector              TEXT,
+    regime              TEXT,
+    telegram_sent       INTEGER DEFAULT 0,
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS india_scan_funnel_tickers (
+    stage            TEXT NOT NULL,
+    ticker           TEXT NOT NULL,
+    scan_date        TEXT NOT NULL,
+    rs_rating        REAL,
+    tt_score         INTEGER,
+    eps_growth       REAL,
+    rev_growth       REAL,
+    base_days        INTEGER,
+    contractions     INTEGER,
+    vcp_score        INTEGER,
+    rejection_reason TEXT,
+    PRIMARY KEY (stage, ticker)
+);
+
+CREATE INDEX IF NOT EXISTS idx_india_watchlist_vcp ON india_watchlist(vcp_score DESC);
+CREATE INDEX IF NOT EXISTS idx_india_signals_date ON india_signals(date);
+CREATE INDEX IF NOT EXISTS idx_india_funnel_stage ON india_scan_funnel_tickers(stage);
+
 -- Scan funnel detail table: which tickers cleared each pipeline stage in the
 -- most-recent scan.  Replaces the previous data on every scan so the view is
 -- always current.  Stage values: 'trend_template', 'fundamentals', 'developing_vcp'.
@@ -402,6 +470,77 @@ def clear_scan_trigger() -> None:
             "INSERT OR REPLACE INTO system_status(key, value, updated_at) "
             "VALUES('scan_trigger', 'done', CURRENT_TIMESTAMP)"
         )
+
+
+def upsert_india_watchlist(ticker: str, data: dict) -> None:
+    """Insert or update an India watchlist entry."""
+    cols = [
+        "ticker", "company_name", "sector", "added_date",
+        "vcp_score", "grade", "pivot_price", "entry_price", "stop_price",
+        "stop_pct", "target_1", "target_2", "base_days",
+        "rs_rating", "rs_line_new_high", "eps_growth", "rev_growth",
+        "fundamentals_score", "breakout_confirmed", "last_updated",
+    ]
+    placeholders = ", ".join("?" for _ in cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "ticker")
+    sql = f"""
+        INSERT INTO india_watchlist ({', '.join(cols)}) VALUES ({placeholders})
+        ON CONFLICT(ticker) DO UPDATE SET {updates}
+    """
+    with db_session() as conn:
+        conn.execute(sql, [data.get(c) for c in cols])
+
+
+def insert_india_signal(data: dict) -> int:
+    """Insert a new India signal row; returns the new row id."""
+    cols = ["ticker", "date", "signal_type", "vcp_score", "pivot_price",
+            "entry_price", "stop_price", "stop_pct", "target_1", "target_2",
+            "rs_rating", "eps_growth", "rev_growth", "sector", "regime"]
+    placeholders = ", ".join("?" for _ in cols)
+    sql = f"INSERT INTO india_signals ({', '.join(cols)}) VALUES ({placeholders})"
+    with db_session() as conn:
+        cursor = conn.execute(sql, [data.get(c) for c in cols])
+        return cursor.lastrowid
+
+
+def cleanup_stale_india_watchlist(max_age_days: int = 14) -> int:
+    """Remove India watchlist entries not refreshed in max_age_days."""
+    with db_session() as conn:
+        result = conn.execute(
+            "DELETE FROM india_watchlist WHERE last_updated < date('now', ?)",
+            (f"-{max_age_days} days",),
+        )
+        return result.rowcount
+
+
+def save_india_scan_funnel_stage(stage: str, rows: list[dict]) -> None:
+    """Replace all rows for one India scan stage with fresh data."""
+    with db_session() as conn:
+        conn.execute("DELETE FROM india_scan_funnel_tickers WHERE stage=?", (stage,))
+        for r in rows:
+            conn.execute(
+                "INSERT INTO india_scan_funnel_tickers "
+                "(stage, ticker, scan_date, rs_rating, tt_score, eps_growth, "
+                "rev_growth, base_days, contractions, vcp_score, rejection_reason) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    stage, r["ticker"], r.get("scan_date", ""),
+                    r.get("rs_rating"), r.get("tt_score"),
+                    r.get("eps_growth"), r.get("rev_growth"),
+                    r.get("base_days"), r.get("contractions"),
+                    r.get("vcp_score"), r.get("rejection_reason"),
+                ),
+            )
+
+
+def get_india_scan_funnel_stage(stage: str) -> list[dict]:
+    """Return India funnel tickers for a stage, ordered by RS descending."""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM india_scan_funnel_tickers WHERE stage=? ORDER BY rs_rating DESC",
+            (stage,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def save_scan_funnel_stage(stage: str, rows: list[dict]) -> None:

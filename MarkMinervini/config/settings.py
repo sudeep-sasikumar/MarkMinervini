@@ -38,7 +38,13 @@ MAX_BASE_TRADING_DAYS = 120     # look-back window for base detection
 # not the minimum duration. 60 was incorrectly used as the minimum in Session 5.
 MIN_BASE_TRADING_DAYS = 15      # 3 weeks minimum (was wrongly 60)
 POCKET_PIVOT_BONUS = 5          # VCP score bonus if pocket pivot confirmed in last 5 days
-CONTRACTION_TIGHTENING_RATIO = 0.90  # each contraction must be < prev * 0.90 (10% tighter minimum)
+# Contraction widening tolerance: how much WIDER than the prior contraction is
+# still acceptable before flagging as "pattern widening."
+# 0.0 = strict monotone (every contraction must be smaller) — too strict, rejects
+#       minor wobbles like [5.4%, 5.8%] or [2.2%, 2.7%] which are valid setups.
+# 0.25 = allow up to 25% wider (e.g., a 5% contraction can be followed by 6.25%).
+#        Aligns with Minervini's intent: the TREND should tighten, not every pair.
+CONTRACTION_WIDENING_TOLERANCE = 0.25
 MIN_CONTRACTIONS = 2
 PIVOT_ZONE_DAYS = 15            # last N days define the pivot zone
 PIVOT_ATR_TIGHT_RATIO = 0.75    # ATR-14 / ATR-50 < this = tight (Score +25)
@@ -167,6 +173,18 @@ BACKTEST_SLIPPAGE = 0.002       # 0.2% slippage on all entries and exits
 BACKTEST_TRAIN_MONTHS = 18
 BACKTEST_TEST_MONTHS = 6
 BACKTEST_ROLL_MONTHS = 6
+
+# ---------------------------------------------------------------------------
+# India Market — NSE equities (separate scan, separate dashboard section)
+# ---------------------------------------------------------------------------
+INDIA_ENABLED = os.getenv("INDIA_ENABLED", "true").lower() != "false"
+INDIA_BENCHMARK_TICKER = "^NSEI"      # Nifty 50 index (India's SPY equivalent)
+INDIA_MIN_PRICE = 50.0                # ₹50 minimum price
+INDIA_MIN_DAILY_VOLUME = 50_000       # shares/day (Indian stocks have lower share counts)
+INDIA_MIN_DOLLAR_VOLUME = 20_000_000  # ₹2 crore minimum daily turnover
+INDIA_RS_MINIMUM = 70                 # RS percentile within India universe (same threshold)
+INDIA_SCAN_HOUR = 11                  # 11:30 BST ≈ 17:00 IST = 30 min after NSE close
+INDIA_SCAN_MINUTE = 30
 
 # ---------------------------------------------------------------------------
 # Sector ETF map (for sector Stage 2 gate)

@@ -544,6 +544,239 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
     return signals_generated
 
 
+def run_india_scan() -> list[dict]:
+    """
+    Execute the SEPA screening pipeline on NSE-listed Indian equities.
+
+    Uses the same Minervini algorithm (TT → Fundamentals → VCP) as the US scan
+    but with India-specific settings:
+      • Universe: Nifty 500 + Midcap 50 + Smallcap 50 + BSE extensions (~300 stocks)
+      • Benchmark: ^NSEI (Nifty 50 index) instead of SPY
+      • Liquidity gates: INR-denominated thresholds
+      • Results stored in india_watchlist / india_signals tables
+
+    Scheduled at 11:30 BST (30 min after NSE closes at 3:30 PM IST / 11:00 BST).
+    Also run at startup if INDIA_ENABLED=true.
+    """
+    logger.info("=" * 60)
+    logger.info("INDIA SCAN STARTED")
+    logger.info("=" * 60)
+    start_time = time.time()
+    today = date.today().isoformat()
+    signals_generated: list[dict] = []
+
+    try:
+        if not settings.INDIA_ENABLED:
+            logger.info("India scan disabled (INDIA_ENABLED=false)")
+            return signals_generated
+
+        from screening.india_universe import get_india_universe
+        from data.fetcher import fetch_ohlcv_batch, fetch_ohlcv
+        from screening.rs_calculator import compute_rs_ratings, check_rs_line_new_high
+        from screening.trend_template import check_trend_template
+        from screening.fundamentals_filter import apply_fundamentals_filter
+        from patterns.vcp_detector import detect_vcp
+        from patterns.pivot_calculator import enrich_vcp_result
+        from alerts.telegram_bot import send_message
+        from database.db import (
+            upsert_india_watchlist, insert_india_signal,
+            save_india_scan_funnel_stage, cleanup_stale_india_watchlist,
+        )
+
+        # --- Universe + price data ---
+        universe = get_india_universe()
+        logger.info("India universe: %d tickers", len(universe))
+
+        price_data = fetch_ohlcv_batch(universe, period="2y")
+        logger.info("India price data: %d/%d tickers loaded [%.1fs]",
+                    len(price_data), len(universe), time.time() - start_time)
+
+        coverage = len(price_data) / max(len(universe), 1) * 100
+        if coverage < 70:
+            logger.error("India coverage too low: %.0f%% — aborting scan", coverage)
+            return signals_generated
+
+        # --- Nifty 50 benchmark (India's SPY) ---
+        nifty_df = fetch_ohlcv(settings.INDIA_BENCHMARK_TICKER, period="2y")
+        if nifty_df is None:
+            logger.warning("India: could not fetch %s — RS line check disabled",
+                           settings.INDIA_BENCHMARK_TICKER)
+
+        # --- RS Ratings (within India universe) ---
+        rs_df = compute_rs_ratings(price_data)
+        rs_map: dict = dict(zip(rs_df["ticker"], rs_df["rs_rating"])) if rs_df is not None else {}
+
+        # Simple India regime: Nifty 50 above its 200-SMA = signals allowed
+        india_signals_allowed = True
+        if nifty_df is not None and len(nifty_df) >= 200:
+            nifty_close = float(nifty_df["Close"].iloc[-1])
+            nifty_sma200 = float(nifty_df["Close"].rolling(200).mean().iloc[-1])
+            india_signals_allowed = nifty_close > nifty_sma200
+            logger.info("India regime: Nifty50=%.0f SMA200=%.0f signals=%s",
+                        nifty_close, nifty_sma200,
+                        "ALLOWED" if india_signals_allowed else "SUPPRESSED")
+
+        # --- Trend Template ---
+        india_tt_passed: list[tuple] = []
+        _tt_funnel: list[dict] = []
+        for ticker, df in price_data.items():
+            rs = rs_map.get(ticker, 0.0)
+            if rs < settings.INDIA_RS_MINIMUM:
+                continue
+            tt = check_trend_template(ticker, df, rs_rating=rs)
+            if tt["passes"]:
+                india_tt_passed.append((ticker, df, tt, rs))
+                _tt_funnel.append({"ticker": ticker, "scan_date": today,
+                                   "rs_rating": rs, "tt_score": tt.get("score", 0)})
+
+        logger.info("India TT: %d/%d passed", len(india_tt_passed), len(price_data))
+
+        # --- Fundamentals ---
+        india_fund_passed: list[tuple] = []
+        _fund_funnel: list[dict] = []
+        for ticker, df, tt, rs in india_tt_passed:
+            fund = apply_fundamentals_filter(ticker)
+            if fund["passes"]:
+                india_fund_passed.append((ticker, df, tt, rs, fund))
+                _fund_funnel.append({
+                    "ticker": ticker, "scan_date": today,
+                    "rs_rating": rs, "tt_score": tt.get("score", 0),
+                    "eps_growth": fund.get("eps_growth_yoy"),
+                    "rev_growth": fund.get("rev_growth_yoy"),
+                })
+
+        logger.info("India Fundamentals: %d/%d passed",
+                    len(india_fund_passed), len(india_tt_passed))
+
+        # --- VCP ---
+        _dev_tickers: list[dict] = []
+        india_watchlist_count = 0
+        india_signal_count = 0
+        _vcp_rejections: dict[str, int] = {}
+
+        for ticker, df, tt, rs, fund in india_fund_passed:
+            try:
+                rs_line_nh = False
+                if nifty_df is not None:
+                    rs_line_nh = check_rs_line_new_high(df, nifty_df)
+
+                vcp = detect_vcp(
+                    ticker, df, trend_template_passes=True,
+                    rs_line_new_high=rs_line_nh,
+                    min_price=settings.INDIA_MIN_PRICE,
+                    min_daily_volume=settings.INDIA_MIN_DAILY_VOLUME,
+                    min_dollar_volume=settings.INDIA_MIN_DOLLAR_VOLUME,
+                )
+                vcp = enrich_vcp_result(vcp)
+
+                if not vcp["watchlist_candidate"]:
+                    _rej = (vcp.get("rejection_reason") or "score<70")[:55]
+                    _vcp_rejections[_rej] = _vcp_rejections.get(_rej, 0) + 1
+                    if (vcp.get("base_days") or 0) >= settings.MIN_BASE_TRADING_DAYS:
+                        _dev_tickers.append({
+                            "ticker": ticker, "scan_date": today,
+                            "rs_rating": rs, "tt_score": tt.get("score", 0),
+                            "eps_growth": fund.get("eps_growth_yoy"),
+                            "rev_growth": fund.get("rev_growth_yoy"),
+                            "base_days": vcp.get("base_days", 0),
+                            "contractions": vcp.get("steps", {}).get("num_contractions", 0),
+                            "vcp_score": vcp.get("vcp_score", 0),
+                            "rejection_reason": vcp.get("rejection_reason", ""),
+                        })
+                    continue
+
+                # Watchlist candidate (score ≥ 70)
+                india_watchlist_count += 1
+                upsert_india_watchlist(ticker, {
+                    "ticker": ticker,
+                    "company_name": ticker,   # no sector lookup to keep it fast
+                    "sector": "India",
+                    "added_date": today,
+                    "vcp_score": vcp["vcp_score"],
+                    "grade": vcp.get("grade"),
+                    "pivot_price": vcp.get("pivot_price"),
+                    "entry_price": vcp.get("entry_price"),
+                    "stop_price": vcp.get("stop_price"),
+                    "stop_pct": vcp.get("stop_pct"),
+                    "target_1": vcp.get("target_1"),
+                    "target_2": vcp.get("target_2"),
+                    "base_days": vcp.get("base_days"),
+                    "rs_rating": rs,
+                    "rs_line_new_high": 1 if rs_line_nh else 0,
+                    "eps_growth": fund.get("eps_growth_yoy"),
+                    "rev_growth": fund.get("rev_growth_yoy"),
+                    "fundamentals_score": fund.get("fundamentals_score"),
+                    "breakout_confirmed": 1 if vcp.get("breakout_confirmed") else 0,
+                    "last_updated": today,
+                })
+
+                # Alert on score ≥ 80 + breakout
+                if vcp["alert"] and india_signals_allowed:
+                    signal_id = insert_india_signal({
+                        "ticker": ticker, "date": today,
+                        "signal_type": vcp["grade"],
+                        "vcp_score": vcp["vcp_score"],
+                        "pivot_price": vcp.get("pivot_price"),
+                        "entry_price": vcp.get("entry_price"),
+                        "stop_price": vcp.get("stop_price"),
+                        "stop_pct": vcp.get("stop_pct"),
+                        "target_1": vcp.get("target_1"),
+                        "target_2": vcp.get("target_2"),
+                        "rs_rating": rs,
+                        "eps_growth": fund.get("eps_growth_yoy"),
+                        "rev_growth": fund.get("rev_growth_yoy"),
+                        "sector": "India",
+                        "regime": "NIFTY_ABOVE_200SMA" if india_signals_allowed else "SUPPRESSED",
+                    })
+                    send_message(
+                        f"🇮🇳 INDIA VCP ALERT: {ticker}\n"
+                        f"Score: {vcp['vcp_score']} ({vcp['grade']})\n"
+                        f"Pivot: ₹{vcp.get('pivot_price', 0):.2f}  "
+                        f"Entry: ₹{vcp.get('entry_price', 0):.2f}  "
+                        f"Stop: ₹{vcp.get('stop_price', 0):.2f} ({vcp.get('stop_pct', 0):.1f}%)\n"
+                        f"EPS: {fund.get('eps_growth_yoy', 0):.1f}%  "
+                        f"Rev: {fund.get('rev_growth_yoy', 0):.1f}%  RS: {rs:.0f}"
+                    )
+                    india_signal_count += 1
+                    signals_generated.append({"ticker": ticker, "vcp_score": vcp["vcp_score"]})
+
+            except Exception as exc:
+                logger.error("India pipeline error for %s: %s", ticker, exc, exc_info=True)
+
+        elapsed = time.time() - start_time
+
+        # --- Save funnel data ---
+        save_india_scan_funnel_stage("trend_template", _tt_funnel)
+        save_india_scan_funnel_stage("fundamentals", _fund_funnel)
+        save_india_scan_funnel_stage("developing_vcp", _dev_tickers)
+
+        # --- Cleanup stale India watchlist ---
+        cleanup_stale_india_watchlist(max_age_days=settings.WATCHLIST_MAX_AGE_DAYS)
+
+        # --- Report ---
+        logger.info("=" * 60)
+        logger.info("INDIA SCAN COMPLETE in %.1fs", elapsed)
+        logger.info("  Funnel: Universe=%d → PriceData=%d → TT=%d → Fund=%d"
+                    " → Watchlist=%d → Signals=%d",
+                    len(universe), len(price_data), len(india_tt_passed),
+                    len(india_fund_passed), india_watchlist_count, india_signal_count)
+        _dev_names = [d["ticker"] for d in _dev_tickers]
+        if _dev_tickers:
+            logger.info("  India developing setups (%d): %s%s",
+                        len(_dev_tickers), ", ".join(_dev_names[:8]),
+                        f" (+{len(_dev_tickers)-8} more)" if len(_dev_tickers) > 8 else "")
+        if _vcp_rejections:
+            _top = sorted(_vcp_rejections.items(), key=lambda x: -x[1])[:3]
+            logger.info("  India VCP top blocks: %s",
+                        " | ".join(f'"{r}"={c}' for r, c in _top))
+        logger.info("=" * 60)
+
+    except Exception as exc:
+        logger.error("India scan crashed: %s", exc, exc_info=True)
+
+    return signals_generated
+
+
 def run_intraday_check():
     """
     Intraday check (every 15 min, 13:30–21:00 BST).
@@ -931,6 +1164,11 @@ def main():
     # Run initial full scan immediately on startup
     logger.info("Running initial scan on startup...")
     run_full_scan()
+
+    # Run India scan on startup (if enabled) — after the US scan completes
+    if settings.INDIA_ENABLED:
+        logger.info("Running initial India scan on startup...")
+        run_india_scan()
 
     # Keep alive — write heartbeat every 60s; also services dashboard-triggered scans.
     # The dashboard writes 'scan_trigger=requested' to system_status; we pick it up

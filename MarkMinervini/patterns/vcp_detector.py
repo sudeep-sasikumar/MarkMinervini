@@ -56,6 +56,9 @@ def detect_vcp(
     df: pd.DataFrame,
     trend_template_passes: bool,
     rs_line_new_high: bool = False,
+    min_price: float | None = None,
+    min_daily_volume: int | None = None,
+    min_dollar_volume: int | None = None,
 ) -> dict:
     """
     Run the full VCP detection algorithm.
@@ -220,16 +223,17 @@ def detect_vcp(
         prev_depth = contractions[i - 1]["depth_pct"]
         curr_depth = contractions[i]["depth_pct"]
 
-        # Hard fail: contraction is WIDER than the previous — not a VCP.
-        # Minervini's methodology requires DECLINING contractions (each smaller
-        # than the last). There is NO specified minimum tightening percentage —
-        # a pattern like [15%, 13%, 12%] is a valid VCP even though the final
-        # step only tightened by 8%. Pattern quality (how tight) is captured
-        # by the ATR ratio score in Step 7, not via a hard ratio gate here.
-        if curr_depth >= prev_depth:
+        # Allow slight widening up to CONTRACTION_WIDENING_TOLERANCE (default 25%).
+        # Strict monotone (curr < prev always) is too aggressive — patterns like
+        # [5.4%, 5.8%] or [2.2%, 2.7%] are minor wobbles in an otherwise
+        # tightening base.  Minervini's intent is that the OVERALL base should
+        # tighten; individual pair comparisons may have small reversals.
+        # A contraction clearly wider than 125% of the prior is a real failure.
+        _tolerance = 1.0 + settings.CONTRACTION_WIDENING_TOLERANCE
+        if curr_depth > prev_depth * _tolerance:
             base_result["rejection_reason"] = (
-                f"Step 5: Contraction {i+1} ({curr_depth:.1f}%) wider than "
-                f"contraction {i} ({prev_depth:.1f}%) — pattern widening, not a VCP"
+                f"Step 5: Contraction {i+1} ({curr_depth:.1f}%) significantly wider than "
+                f"contraction {i} ({prev_depth:.1f}%) — exceeds {settings.CONTRACTION_WIDENING_TOLERANCE*100:.0f}% tolerance"
             )
             base_result["steps"] = steps
             logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
@@ -380,13 +384,18 @@ def detect_vcp(
     steps["breakout_confirmed"] = breakout
     base_result["breakout_confirmed"] = breakout
 
-    # Anti-false-positive liquidity gates
+    # Anti-false-positive liquidity gates.
+    # Callers may pass explicit overrides (e.g. India scan uses INR thresholds).
+    _min_vol    = min_daily_volume  if min_daily_volume  is not None else settings.MIN_DAILY_VOLUME
+    _min_dollar = min_dollar_volume if min_dollar_volume is not None else settings.MIN_DOLLAR_VOLUME
+    _min_price  = min_price         if min_price         is not None else settings.MIN_PRICE
+
     avg_dollar_vol = avg_vol_50 * float(quality_df["Close"].iloc[-50:].mean())
     price = float(today_bar["Close"])
 
-    if avg_vol_50 < settings.MIN_DAILY_VOLUME:
+    if avg_vol_50 < _min_vol:
         base_result["rejection_reason"] = (
-            f"Liquidity gate: avg volume {avg_vol_50:,.0f} < {settings.MIN_DAILY_VOLUME:,}"
+            f"Liquidity gate: avg volume {avg_vol_50:,.0f} < {_min_vol:,}"
         )
         base_result["vcp_score"] = score
         base_result["grade"] = grade_vcp(score)
@@ -394,9 +403,9 @@ def detect_vcp(
         base_result["steps"] = steps
         return base_result
 
-    if avg_dollar_vol < settings.MIN_DOLLAR_VOLUME:
+    if avg_dollar_vol < _min_dollar:
         base_result["rejection_reason"] = (
-            f"Liquidity gate: avg dollar volume ${avg_dollar_vol:,.0f} < ${settings.MIN_DOLLAR_VOLUME:,}"
+            f"Liquidity gate: avg dollar volume {avg_dollar_vol:,.0f} < {_min_dollar:,}"
         )
         base_result["vcp_score"] = score
         base_result["grade"] = grade_vcp(score)
@@ -404,8 +413,8 @@ def detect_vcp(
         base_result["steps"] = steps
         return base_result
 
-    if price < settings.MIN_PRICE:
-        base_result["rejection_reason"] = f"Price ${price:.2f} < ${settings.MIN_PRICE}"
+    if price < _min_price:
+        base_result["rejection_reason"] = f"Price {price:.2f} < {_min_price}"
         base_result["vcp_score"] = score
         base_result["grade"] = grade_vcp(score)
         base_result["contractions"] = contractions

@@ -123,8 +123,9 @@ def _regime_colour(regime: str) -> str:
 # ---------------------------------------------------------------------------
 page = st.sidebar.radio(
     "Navigation",
-    ["🏠 Live Dashboard", "🔍 Scan Funnel", "📋 Watchlist", "📈 Signal History",
-     "💼 Trade Journal", "⚙️ System Status", "📊 Backtest Results"],
+    ["🏠 Live Dashboard", "🔍 Scan Funnel", "🇮🇳 India", "📋 Watchlist",
+     "📈 Signal History", "💼 Trade Journal", "⚙️ System Status",
+     "📊 Backtest Results"],
 )
 
 st.sidebar.markdown("---")
@@ -792,7 +793,171 @@ elif page == "🔍 Scan Funnel":
 
 
 # ===========================================================================
-# PAGE 3 — Watchlist
+# PAGE 3 — India
+# ===========================================================================
+elif page == "🇮🇳 India":
+    st.title("🇮🇳 India — NSE Equities (Minervini SEPA)")
+    st.caption(
+        "Applies the same Trend Template → Fundamentals → VCP pipeline to Indian equities. "
+        "Universe: Nifty 500 + Nifty Midcap 50 + BSE MidCap + Nifty Smallcap 50 + BSE SmallCap (~300 tickers). "
+        "Scan runs daily at 11:30 BST (30 min after NSE closes)."
+    )
+
+    from database.db import get_india_scan_funnel_stage
+
+    # --- Load India data ---
+    india_tt   = get_india_scan_funnel_stage("trend_template")
+    india_fund = get_india_scan_funnel_stage("fundamentals")
+    india_dev  = get_india_scan_funnel_stage("developing_vcp")
+
+    _ic = get_connection()
+    india_wl_count  = _ic.execute("SELECT COUNT(*) FROM india_watchlist").fetchone()[0]
+    india_sig_count = _ic.execute(
+        "SELECT COUNT(*) FROM india_signals WHERE date=?",
+        (date.today().isoformat(),)
+    ).fetchone()[0]
+    india_scan_date = india_tt[0]["scan_date"] if india_tt else None
+    _ic.close()
+
+    if not india_tt and not india_dev:
+        st.info(
+            "No India scan data yet. The India scan runs automatically at **11:30 BST** "
+            "on weekdays after NSE closes. You can also trigger it manually using the "
+            "**🔍 Run Full Scan Now** sidebar button (this will run both US and India scans)."
+        )
+    else:
+        st.markdown(f"**Last India scan:** {india_scan_date or '—'}")
+        st.markdown("---")
+
+        # Pipeline overview
+        india_cols = st.columns(5)
+        _india_stages = [
+            ("✅ TT Passed",     len(india_tt),       "Trend Template: price/MA stack + RS ≥ 70"),
+            ("💹 Fundamentals",  len(india_fund),     "EPS ≥ 20%, Revenue ≥ 15%"),
+            ("🔧 Developing",    len(india_dev),      f"Base ≥ {settings.MIN_BASE_TRADING_DAYS}d, not yet VCP"),
+            ("📋 Watchlist",     india_wl_count,      "VCP score ≥ 70 — setup forming"),
+            ("🚨 Signals Today", india_sig_count,     "VCP ≥ 80 + confirmed breakout"),
+        ]
+        for col, (label, count, tip) in zip(india_cols, _india_stages):
+            col.metric(label=label, value=count, help=tip)
+
+        st.markdown("---")
+
+        tab_tt, tab_fund, tab_dev, tab_wl, tab_sig = st.tabs([
+            f"✅ TT ({len(india_tt)})",
+            f"💹 Fund ({len(india_fund)})",
+            f"🔧 Developing ({len(india_dev)})",
+            f"📋 Watchlist ({india_wl_count})",
+            f"🚨 Signals ({india_sig_count})",
+        ])
+
+        with tab_tt:
+            st.subheader(f"Trend Template — {len(india_tt)} Indian stocks")
+            st.caption("All 8 Minervini criteria passing within the India universe. RS ≥ 70 relative to other NSE stocks.")
+            if india_tt:
+                _df = pd.DataFrame(india_tt)[["ticker", "rs_rating", "tt_score", "scan_date"]]
+                _df.columns = ["Ticker", "RS Rating", "TT Score (/8)", "Scan Date"]
+                _df["RS Rating"] = _df["RS Rating"].apply(lambda x: f"{x:.1f}" if x else "—")
+                st.dataframe(_df.sort_values("RS Rating", ascending=False),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.info("No data — run a scan.")
+
+        with tab_fund:
+            st.subheader(f"Fundamentals — {len(india_fund)} Indian stocks")
+            st.caption("Passed TT AND EPS growth ≥ 20% + Revenue growth ≥ 15%.")
+            if india_fund:
+                _df = pd.DataFrame(india_fund)[
+                    ["ticker", "rs_rating", "tt_score", "eps_growth", "rev_growth"]
+                ]
+                _df.columns = ["Ticker", "RS Rating", "TT Score", "EPS Growth %", "Rev Growth %"]
+                for c in ["RS Rating", "EPS Growth %", "Rev Growth %"]:
+                    _df[c] = _df[c].apply(lambda x: f"{x:.1f}%" if x is not None else "—")
+                st.dataframe(_df.sort_values("RS Rating", ascending=False),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.info("No data — run a scan.")
+
+        with tab_dev:
+            st.subheader(f"Developing VCPs — {len(india_dev)} Indian stocks")
+            st.caption(
+                f"Base ≥ {settings.MIN_BASE_TRADING_DAYS} days but score < 70. "
+                "Watch daily — these will advance to Watchlist when contractions develop."
+            )
+            if india_dev:
+                _df = pd.DataFrame(india_dev)
+                _rename = {
+                    "ticker": "Ticker", "base_days": "Base Days",
+                    "contractions": "Contractions", "vcp_score": "VCP Score",
+                    "rs_rating": "RS Rating", "eps_growth": "EPS %",
+                    "rev_growth": "Rev %", "rejection_reason": "Why Not Yet VCP",
+                }
+                _cols = [c for c in _rename if c in _df.columns]
+                _disp = _df[_cols].copy().rename(columns=_rename)
+                if "RS Rating" in _disp.columns:
+                    _disp["RS Rating"] = _disp["RS Rating"].apply(
+                        lambda x: f"{x:.1f}%" if x is not None else "—")
+                for c in ["EPS %", "Rev %"]:
+                    if c in _disp.columns:
+                        _disp[c] = _disp[c].apply(
+                            lambda x: f"{x:.1f}%" if x is not None else "—")
+                if "Contractions" in _disp.columns:
+                    _disp["Progress"] = _disp["Contractions"].apply(
+                        lambda c: "🟡 1/2" if c == 1
+                        else ("🟢 ≥2" if c >= 2 else "⚪ 0"))
+                if "Why Not Yet VCP" in _disp.columns:
+                    _disp["Why Not Yet VCP"] = _disp["Why Not Yet VCP"].apply(
+                        lambda x: (x[:70] + "…") if x and len(x) > 70 else (x or "—"))
+                st.dataframe(_disp.sort_values("Base Days", ascending=False),
+                             use_container_width=True, hide_index=True)
+                _near = [d for d in india_dev if (d.get("contractions") or 0) >= 2]
+                if _near:
+                    st.success(
+                        f"**{len(_near)} stock(s) have ≥ 2 contractions** (closest to Watchlist): "
+                        + ", ".join(d["ticker"] for d in _near)
+                    )
+            else:
+                st.info("No developing India setups — all passing stocks still in uptrend (base < 15 days).")
+
+        with tab_wl:
+            st.subheader(f"India Watchlist — VCP score ≥ 70 ({india_wl_count} stocks)")
+            _conn_wl = get_connection()
+            _wl = _conn_wl.execute(
+                "SELECT ticker, vcp_score, grade, base_days, pivot_price, entry_price, "
+                "stop_pct, rs_rating, eps_growth, rev_growth, breakout_confirmed, last_updated "
+                "FROM india_watchlist ORDER BY vcp_score DESC"
+            ).fetchall()
+            _conn_wl.close()
+            if _wl:
+                _df = pd.DataFrame([dict(r) for r in _wl])
+                _df.columns = ["Ticker", "VCP Score", "Grade", "Base Days",
+                               "Pivot ₹", "Entry ₹", "Stop %", "RS",
+                               "EPS %", "Rev %", "Breakout ✓", "Updated"]
+                st.dataframe(_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No India watchlist entries yet.")
+
+        with tab_sig:
+            st.subheader(f"India Signals — today ({india_sig_count})")
+            _conn_sig = get_connection()
+            _sigs = _conn_sig.execute(
+                "SELECT ticker, date, signal_type, vcp_score, pivot_price, entry_price, "
+                "stop_price, stop_pct, target_1, target_2, rs_rating, eps_growth, rev_growth "
+                "FROM india_signals ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+            _conn_sig.close()
+            if _sigs:
+                _df = pd.DataFrame([dict(r) for r in _sigs])
+                _df.columns = ["Ticker", "Date", "Type", "Score", "Pivot ₹",
+                               "Entry ₹", "Stop ₹", "Stop %", "T1 ₹", "T2 ₹",
+                               "RS", "EPS %", "Rev %"]
+                st.dataframe(_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No India signals yet.")
+
+
+# ===========================================================================
+# PAGE 4 — Watchlist
 # ===========================================================================
 elif page == "📋 Watchlist":
     st.title("📋 Watchlist")

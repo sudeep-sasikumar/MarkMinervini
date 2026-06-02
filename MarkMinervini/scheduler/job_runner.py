@@ -126,6 +126,26 @@ def create_scheduler() -> BackgroundScheduler:
         misfire_grace_time=60,
     )
 
+    # --- 11:30 BST Mon–Fri: India scan (30 min after NSE closes at 11:00 BST) ---
+    # NSE market hours: 09:15–15:30 IST = 03:45–10:00 BST (winter) / 04:45–11:00 BST (summer)
+    # 11:30 BST gives 30–90 min buffer to ensure final bars are available from yfinance.
+    from config import settings as _cfg
+    if _cfg.INDIA_ENABLED:
+        scheduler.add_job(
+            job_india_scan,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=_cfg.INDIA_SCAN_HOUR,
+                minute=_cfg.INDIA_SCAN_MINUTE,
+                timezone=BST,
+            ),
+            id="india_scan",
+            name="India NSE full scan",
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=1800,
+        )
+
     # --- Sunday 10:00: Weekly AI analysis + backtest ---
     scheduler.add_job(
         job_weekly,
@@ -386,6 +406,20 @@ def job_post_market():
         logger.info("=== JOB: Post-Market DONE in %.1fs ===", time.time() - _job_start)
     except Exception as exc:
         logger.error("Post-market job failed after %.1fs: %s",
+                     time.time() - _job_start, exc, exc_info=True)
+
+
+def job_india_scan():
+    """11:30 BST Mon–Fri — India NSE full scan (after NSE market closes)."""
+    _job_start = time.time()
+    logger.info("=== JOB: India Scan ===")
+    try:
+        from main import run_india_scan
+        signals = run_india_scan()
+        logger.info("=== JOB: India Scan DONE in %.1fs | signals=%d ===",
+                    time.time() - _job_start, len(signals) if signals else 0)
+    except Exception as exc:
+        logger.error("India scan failed after %.1fs: %s",
                      time.time() - _job_start, exc, exc_info=True)
 
 
