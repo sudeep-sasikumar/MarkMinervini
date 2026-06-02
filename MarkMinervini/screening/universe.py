@@ -234,6 +234,16 @@ def _russell1000_supplemental() -> list[str]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Ticker blacklist — delisted, renamed, or single-letter tickers that appear
+# in scraped lists but have no valid yfinance data.  Removing them eliminates
+# retry penalties (each adds ~5s via Finnhub fallback + 403) and keeps logs clean.
+# ---------------------------------------------------------------------------
+_TICKER_BLACKLIST: set[str] = {
+    "Q",      # Quintiles → merged into IQV (IQVIA) 2017; appears in some Wikipedia tables
+}
+
+
 def get_universe() -> list[str]:
     """
     Return deduplicated union of S&P 500 + Russell 1000 tickers.
@@ -242,6 +252,13 @@ def get_universe() -> list[str]:
     sp500 = get_sp500_tickers()
     russell = get_russell1000_tickers()
     combined = list(dict.fromkeys(sp500 + russell))  # preserve order, deduplicate
+    # Remove known-bad tickers (delisted, renamed) that waste time on retries
+    before = len(combined)
+    combined = [t for t in combined if t not in _TICKER_BLACKLIST]
+    if len(combined) < before:
+        logger.info("Removed %d blacklisted ticker(s): %s",
+                    before - len(combined),
+                    sorted(_TICKER_BLACKLIST & set(sp500 + russell)))
     logger.info("Universe: %d unique tickers (S&P500=%d, Russell1000=%d)",
                 len(combined), len(sp500), len(russell))
     return combined
