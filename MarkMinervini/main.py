@@ -606,6 +606,27 @@ def run_india_scan() -> list[dict]:
         rs_df = compute_rs_ratings(price_data)
         rs_map: dict = dict(zip(rs_df["ticker"], rs_df["rs_rating"])) if rs_df is not None else {}
 
+        rs_above_min = sum(1 for rs_val in rs_map.values() if rs_val >= settings.INDIA_RS_MINIMUM)
+        logger.info(
+            "India RS: computed for %d/%d tickers (RS≥%d: %d stocks)",
+            len(rs_map), len(price_data), settings.INDIA_RS_MINIMUM, rs_above_min,
+        )
+
+        # If RS computation returned very few results (< 20% of universe),
+        # it likely failed silently (eligible dict empty or all valid_mask failures).
+        # In that case, skip the RS pre-filter so TT can still run on all tickers;
+        # use a neutral RS placeholder (75.0) so C8 doesn't block all stocks.
+        # The actual rs_rating stored in the funnel uses the real value (0.0 if unknown).
+        _rs_ok = len(rs_map) >= max(10, len(price_data) * 0.20)
+        if not _rs_ok:
+            logger.warning(
+                "India RS computation returned only %d/%d entries — RS pre-filter "
+                "DISABLED for this scan; all %d tickers will run TT (C1-C7). "
+                "This is usually caused by tickers having < 252 rows of history. "
+                "Check the RS WARNING above for root cause.",
+                len(rs_map), len(price_data), len(price_data),
+            )
+
         # Simple India regime: Nifty 50 above its 200-SMA = signals allowed
         india_signals_allowed = True
         if nifty_df is not None and len(nifty_df) >= 200:
@@ -619,16 +640,25 @@ def run_india_scan() -> list[dict]:
         # --- Trend Template ---
         india_tt_passed: list[tuple] = []
         _tt_funnel: list[dict] = []
+        _tt_rs_filtered = 0  # count of stocks skipped by RS pre-filter
         for ticker, df in price_data.items():
             rs = rs_map.get(ticker, 0.0)
-            if rs < settings.INDIA_RS_MINIMUM:
+            # RS pre-filter: fast skip for low-RS stocks (only when RS map is reliable)
+            if _rs_ok and rs < settings.INDIA_RS_MINIMUM:
+                _tt_rs_filtered += 1
                 continue
-            tt = check_trend_template(ticker, df, rs_rating=rs)
+            # When RS map failed, pass neutral RS so C8 doesn't block all stocks.
+            # Store the ACTUAL rs (0.0 when unknown) in the funnel for transparency.
+            tt_rs = rs if _rs_ok else 75.0
+            tt = check_trend_template(ticker, df, rs_rating=tt_rs)
             if tt["passes"]:
                 india_tt_passed.append((ticker, df, tt, rs))
                 _tt_funnel.append({"ticker": ticker, "scan_date": today,
                                    "rs_rating": rs, "tt_score": tt.get("score", 0)})
 
+        if _rs_ok and _tt_rs_filtered:
+            logger.info("India RS pre-filter: removed %d/%d low-RS stocks before TT",
+                        _tt_rs_filtered, len(price_data))
         logger.info("India TT: %d/%d passed", len(india_tt_passed), len(price_data))
 
         # --- Fundamentals ---

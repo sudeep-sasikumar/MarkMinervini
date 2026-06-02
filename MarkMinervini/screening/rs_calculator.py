@@ -57,7 +57,18 @@ def compute_rs_ratings(
     # Build a single wide DataFrame of adjusted closes
     eligible = {t: df["Close"] for t, df in price_data.items() if len(df) >= 252}
     if not eligible:
+        logger.warning(
+            "RS: 0/%d tickers have ≥252 rows — RS computation skipped. "
+            "All tickers have insufficient history for IBD quarterly formula. "
+            "Check that price_data was fetched with period≥'2y'.",
+            len(price_data),
+        )
         return pd.DataFrame(columns=["ticker", "rs_raw", "rs_rating"])
+    elif len(eligible) < len(price_data) * 0.5:
+        logger.warning(
+            "RS: only %d/%d tickers have ≥252 rows — RS rankings may be skewed.",
+            len(eligible), len(price_data),
+        )
 
     closes = pd.concat(eligible, axis=1)
 
@@ -84,6 +95,13 @@ def compute_rs_ratings(
     rs_raw = 0.40 * q4 + 0.20 * q3 + 0.20 * q2 + 0.20 * q1
 
     if rs_raw.empty:
+        logger.warning(
+            "RS: all %d eligible tickers failed the valid_mask check "
+            "(NaN or zero price at one of the 5 quarterly anchor points). "
+            "Check date alignment in price_data — possibly a timezone or "
+            "holiday mismatch causing iloc[-252] to land on a NaN row.",
+            len(eligible),
+        )
         return pd.DataFrame(columns=["ticker", "rs_raw", "rs_rating"])
 
     df_rs = rs_raw.reset_index()

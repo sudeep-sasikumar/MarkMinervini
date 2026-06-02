@@ -219,25 +219,33 @@ def detect_vcp(
         logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
         return base_result
 
-    for i in range(1, len(contractions)):
-        prev_depth = contractions[i - 1]["depth_pct"]
-        curr_depth = contractions[i]["depth_pct"]
-
-        # Allow slight widening up to CONTRACTION_WIDENING_TOLERANCE (default 25%).
-        # Strict monotone (curr < prev always) is too aggressive — patterns like
-        # [5.4%, 5.8%] or [2.2%, 2.7%] are minor wobbles in an otherwise
-        # tightening base.  Minervini's intent is that the OVERALL base should
-        # tighten; individual pair comparisons may have small reversals.
-        # A contraction clearly wider than 125% of the prior is a real failure.
-        _tolerance = 1.0 + settings.CONTRACTION_WIDENING_TOLERANCE
-        if curr_depth > prev_depth * _tolerance:
-            base_result["rejection_reason"] = (
-                f"Step 5: Contraction {i+1} ({curr_depth:.1f}%) significantly wider than "
-                f"contraction {i} ({prev_depth:.1f}%) — exceeds {settings.CONTRACTION_WIDENING_TOLERANCE*100:.0f}% tolerance"
-            )
-            base_result["steps"] = steps
-            logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
-            return base_result
+    # Overall tightening check — compare FIRST vs LAST contraction only.
+    #
+    # Minervini's intent is that the OVERALL pattern tightens, not that every
+    # single adjacent pair must be smaller.  Intermediate contractions can wobble
+    # (noise in swing detection) without invalidating the setup.
+    #
+    # Adjacent-pair checking (old code) was too strict and rejected real VCPs:
+    #   ABBV [14.5%, 4.7%, 8.2%]: pair 4.7%→8.2% = +74% → was rejected ✗
+    #   HSY  [10.0%, 5.0%, 2.7%, 4.0%]: pair 2.7%→4.0% = +48% → was rejected ✗
+    #   CNC  [16.0%, 5.8%, 9.2%]: pair 5.8%→9.2% = +59% → was rejected ✗
+    # All three have a CLEARLY tightening base when comparing first vs last.
+    #
+    # New rule: last contraction ≤ first contraction × (1 + tolerance).
+    # This catches genuinely widening patterns [5%, 8%] while allowing intermediate
+    # noise [14.5%, 4.7%, 8.2%] where last (8.2%) < first (14.5%).
+    _tolerance = 1.0 + settings.CONTRACTION_WIDENING_TOLERANCE
+    first_depth = contractions[0]["depth_pct"]
+    last_depth  = contractions[-1]["depth_pct"]
+    if last_depth > first_depth * _tolerance:
+        base_result["rejection_reason"] = (
+            f"Step 5: Overall contraction widening — last ({last_depth:.1f}%) > "
+            f"first ({first_depth:.1f}%) × {_tolerance:.2f} = "
+            f"{first_depth * _tolerance:.1f}% (max allowed)"
+        )
+        base_result["steps"] = steps
+        logger.debug("VCP %s: FAIL %s", ticker, base_result["rejection_reason"])
+        return base_result
 
     # Scoring: Minervini validates 2-contraction VCPs ("W" base) as legitimate setups.
     # Scoring math with +25 base:
