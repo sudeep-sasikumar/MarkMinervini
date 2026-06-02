@@ -123,7 +123,7 @@ def _regime_colour(regime: str) -> str:
 # ---------------------------------------------------------------------------
 page = st.sidebar.radio(
     "Navigation",
-    ["🏠 Live Dashboard", "📋 Watchlist", "📈 Signal History",
+    ["🏠 Live Dashboard", "🔍 Scan Funnel", "📋 Watchlist", "📈 Signal History",
      "💼 Trade Journal", "⚙️ System Status", "📊 Backtest Results"],
 )
 
@@ -577,7 +577,222 @@ if page == "🏠 Live Dashboard":
 
 
 # ===========================================================================
-# PAGE 2 — Watchlist
+# PAGE 2 — Scan Funnel
+# ===========================================================================
+elif page == "🔍 Scan Funnel":
+    st.title("🔍 Scan Funnel")
+    st.caption(
+        "Tracks every stock through the SEPA pipeline — from 638-name universe down to "
+        "VCP signals.  Updated after each scan."
+    )
+
+    from database.db import get_scan_funnel_stage
+
+    # --- Load all stage data ---
+    tt_rows    = get_scan_funnel_stage("trend_template")
+    fund_rows  = get_scan_funnel_stage("fundamentals")
+    dev_rows   = get_scan_funnel_stage("developing_vcp")
+
+    conn_tmp = get_connection()
+    wl_count   = conn_tmp.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
+    sig_count  = conn_tmp.execute(
+        "SELECT COUNT(*) FROM signals WHERE date=?", (date.today().isoformat(),)
+    ).fetchone()[0]
+    # Universe size from latest system_log entry that contains "Scan funnel:"
+    _uni_row = conn_tmp.execute(
+        "SELECT message FROM system_log WHERE message LIKE 'Scan funnel:%' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn_tmp.close()
+
+    universe_count = 0
+    if _uni_row:
+        import json as _jsfunnel, re as _refunnel
+        _m = _refunnel.search(r'"universe"\s*:\s*(\d+)', _uni_row["message"])
+        if _m:
+            universe_count = int(_m.group(1))
+
+    scan_date_str = tt_rows[0]["scan_date"] if tt_rows else "—"
+
+    # ── Pipeline overview ────────────────────────────────────────────────────
+    st.markdown(f"**Last scan:** {scan_date_str}")
+    st.markdown("---")
+
+    cols = st.columns(6)
+    _funnel_stages = [
+        ("🌐 Universe",         universe_count,   "All US-listed equities in S&P 500 + Russell 1000 supplemental"),
+        ("✅ Trend Template",   len(tt_rows),      "Price above 50/150/200 SMA stack, RS ≥ 70, within 25% of 52wk high"),
+        ("💹 Fundamentals",     len(fund_rows),    "EPS growth ≥ 20%, Revenue growth ≥ 15%"),
+        ("🔧 Developing VCPs",  len(dev_rows),     f"Base ≥ {settings.MIN_BASE_TRADING_DAYS}d but not yet full VCP (score < 70)"),
+        ("📋 Watchlist",        wl_count,          "VCP score ≥ 70 — setup forming, near pivot"),
+        ("🚨 Signals Today",    sig_count,         "VCP score ≥ 80 + confirmed breakout on volume"),
+    ]
+    for col, (label, count, tip) in zip(cols, _funnel_stages):
+        col.metric(label=label, value=count, help=tip)
+
+    # Attrition arrows
+    if tt_rows:
+        _arrow_cols = st.columns(6)
+        _prev = universe_count if universe_count else len(tt_rows)
+        _counts = [universe_count, len(tt_rows), len(fund_rows), len(dev_rows), wl_count, sig_count]
+        for i, (acol, cnt) in enumerate(zip(_arrow_cols, _counts)):
+            if i == 0:
+                acol.caption("")
+                continue
+            prev = _counts[i - 1]
+            pct = f"{cnt / prev * 100:.0f}% pass" if prev else "—"
+            acol.caption(f"↑ {pct}")
+
+    st.markdown("---")
+
+    # ── Explanation of why developing setups ≠ watchlist ────────────────────
+    if dev_rows:
+        st.info(
+            f"**Why aren't Developing VCPs in the Watchlist?**  "
+            f"The watchlist requires a VCP score ≥ 70. Scoring only begins once a stock has ≥ 2 "
+            f"contractions in its base. A 1-contraction stock scores 0 — the detector returns "
+            f"early at Step 5 before any points are awarded. "
+            f"These {len(dev_rows)} stocks are forming bases and will advance to the Watchlist "
+            f"once they develop a second contraction leg (typically 1–4 more weeks)."
+        )
+
+    # ── Tabs for each stage ──────────────────────────────────────────────────
+    tab_labels = [
+        f"✅ TT ({len(tt_rows)})",
+        f"💹 Fund ({len(fund_rows)})",
+        f"🔧 Developing ({len(dev_rows)})",
+        f"📋 Watchlist ({wl_count})",
+    ]
+    tab_tt, tab_fund, tab_dev, tab_wl = st.tabs(tab_labels)
+
+    # ── Tab 1: Trend Template passed ─────────────────────────────────────────
+    with tab_tt:
+        st.subheader(f"Trend Template — {len(tt_rows)} stocks")
+        st.caption(
+            "All 8 Minervini criteria: price above 50/150/200 SMA stack, 200-SMA rising, "
+            "within 25% of 52wk high, above 30% of 52wk low, RS ≥ 70.  "
+            "These go into the Fundamentals filter next."
+        )
+        if tt_rows:
+            _tt_df = pd.DataFrame(tt_rows)[["ticker", "rs_rating", "tt_score", "scan_date"]]
+            _tt_df.columns = ["Ticker", "RS Rating", "TT Score (/8)", "Scan Date"]
+            _tt_df["RS Rating"] = _tt_df["RS Rating"].apply(
+                lambda x: f"{x:.1f}" if x is not None else "—"
+            )
+            _tt_df = _tt_df.sort_values("RS Rating", ascending=False)
+            st.dataframe(_tt_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No data yet — run a scan first.")
+
+    # ── Tab 2: Fundamentals passed ───────────────────────────────────────────
+    with tab_fund:
+        st.subheader(f"Fundamentals — {len(fund_rows)} stocks")
+        st.caption(
+            "Passed Trend Template AND EPS growth ≥ 20% + Revenue growth ≥ 15%.  "
+            "These enter the VCP detector."
+        )
+        if fund_rows:
+            _fund_df = pd.DataFrame(fund_rows)[
+                ["ticker", "rs_rating", "tt_score", "eps_growth", "rev_growth", "scan_date"]
+            ]
+            _fund_df.columns = ["Ticker", "RS Rating", "TT Score", "EPS Growth %", "Rev Growth %", "Scan Date"]
+            for col in ["RS Rating", "EPS Growth %", "Rev Growth %"]:
+                _fund_df[col] = _fund_df[col].apply(
+                    lambda x: f"{x:.1f}%" if x is not None else "—"
+                )
+            _fund_df = _fund_df.sort_values("RS Rating", ascending=False)
+            st.dataframe(_fund_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No data yet — run a scan first.")
+
+    # ── Tab 3: Developing VCPs ────────────────────────────────────────────────
+    with tab_dev:
+        st.subheader(f"Developing VCPs — {len(dev_rows)} stocks")
+        st.caption(
+            f"Passed TT + Fundamentals and have a base ≥ {settings.MIN_BASE_TRADING_DAYS} days, "
+            f"but score < 70 (not yet full VCP quality).  "
+            f"Watch these daily — they will advance to the Watchlist as they tighten."
+        )
+        if dev_rows:
+            _dev_df = pd.DataFrame(dev_rows)
+            # Select and rename display columns
+            _dev_cols = {
+                "ticker": "Ticker",
+                "base_days": "Base Days",
+                "contractions": "Contractions",
+                "vcp_score": "VCP Score",
+                "rs_rating": "RS Rating",
+                "eps_growth": "EPS %",
+                "rev_growth": "Rev %",
+                "rejection_reason": "Why Not Yet VCP",
+            }
+            _dev_display = _dev_df[[c for c in _dev_cols if c in _dev_df.columns]].copy()
+            _dev_display.rename(columns=_dev_cols, inplace=True)
+
+            for col in ["RS Rating", "EPS %", "Rev %"]:
+                if col in _dev_display.columns:
+                    _dev_display[col] = _dev_display[col].apply(
+                        lambda x: f"{x:.1f}%" if x is not None else "—"
+                    )
+
+            # Shorten rejection reason for display
+            if "Why Not Yet VCP" in _dev_display.columns:
+                _dev_display["Why Not Yet VCP"] = _dev_display["Why Not Yet VCP"].apply(
+                    lambda x: (x[:80] + "…") if x and len(x) > 80 else (x or "—")
+                )
+
+            # Add a progress indicator: how many contractions vs the 2 needed
+            if "Contractions" in _dev_display.columns:
+                _dev_display["Progress"] = _dev_display["Contractions"].apply(
+                    lambda c: "🟡 1/2 — needs 1 more" if c == 1
+                    else ("🟢 ≥2 — almost!" if c >= 2 else "⚪ 0 — early base")
+                )
+
+            _dev_display = _dev_display.sort_values("Base Days", ascending=False)
+            st.dataframe(_dev_display, use_container_width=True, hide_index=True)
+
+            # Highlight the closest-to-advancing stocks
+            _two_c = [d for d in dev_rows if (d.get("contractions") or 0) >= 2]
+            if _two_c:
+                st.success(
+                    f"**{len(_two_c)} stock(s) have ≥ 2 contractions** and are the closest to "
+                    f"advancing to the Watchlist: "
+                    + ", ".join(d["ticker"] for d in sorted(_two_c, key=lambda x: -(x.get("base_days") or 0)))
+                )
+        else:
+            st.info(
+                "No developing setups. All fundamentals-passing stocks have bases < "
+                f"{settings.MIN_BASE_TRADING_DAYS} days — they are still making new highs."
+            )
+
+    # ── Tab 4: Watchlist ──────────────────────────────────────────────────────
+    with tab_wl:
+        st.subheader(f"Watchlist — {wl_count} stocks (VCP score ≥ 70)")
+        _wl_conn = get_connection()
+        _wl_rows = _wl_conn.execute(
+            "SELECT ticker, company_name, sector, vcp_score, grade, base_days, "
+            "pivot_price, entry_price, stop_pct, rs_rating, "
+            "eps_growth, rev_growth, breakout_confirmed, last_updated "
+            "FROM watchlist ORDER BY vcp_score DESC"
+        ).fetchall()
+        _wl_conn.close()
+        if _wl_rows:
+            _wl_df = pd.DataFrame([dict(r) for r in _wl_rows])
+            _wl_df.columns = [
+                "Ticker", "Company", "Sector", "VCP Score", "Grade", "Base Days",
+                "Pivot $", "Entry $", "Stop %", "RS", "EPS %", "Rev %",
+                "Breakout ✓", "Last Updated",
+            ]
+            st.dataframe(_wl_df, use_container_width=True, hide_index=True)
+        else:
+            st.info(
+                "Watchlist is empty. Stocks reach here when VCP score ≥ 70. "
+                "Check Developing VCPs tab for stocks that are almost there."
+            )
+
+
+# ===========================================================================
+# PAGE 3 — Watchlist
 # ===========================================================================
 elif page == "📋 Watchlist":
     st.title("📋 Watchlist")

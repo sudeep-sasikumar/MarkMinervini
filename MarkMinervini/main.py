@@ -148,6 +148,12 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         logger.info("Trend Template: %d/%d passed [%.1fs]",
                     len(trend_passed), len(price_data), _step_times["trend_template"])
 
+        # Capture TT-passed ticker details for the Scan Funnel dashboard page.
+        _tt_funnel_data = [
+            {"ticker": t, "scan_date": today, "rs_rating": rs, "tt_score": tt.get("score", 0)}
+            for t, df, tt, rs in trend_passed
+        ]
+
         # Log the top criterion failure reasons so we know what's blocking stocks
         if _tt_crit_fails:
             _top_fails = sorted(_tt_crit_fails.items(), key=lambda x: -x[1])[:5]
@@ -185,6 +191,18 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         _step_times["fundamentals"] = time.time() - _t0
         logger.info("Fundamentals: %d/%d passed [%.1fs]",
                     len(fundamentals_passed), len(trend_passed), _step_times["fundamentals"])
+
+        # Capture fundamentals-passed ticker details for the Scan Funnel dashboard page.
+        _fund_funnel_data = [
+            {
+                "ticker": t, "scan_date": today, "rs_rating": rs,
+                "tt_score": tt.get("score", 0),
+                "eps_growth": f.get("eps_growth_yoy"),
+                "rev_growth": f.get("rev_growth_yoy"),
+            }
+            for t, df, tt, rs, f in fundamentals_passed
+        ]
+
         if _fund_sources:
             logger.info("  Fundamentals sources: %s",
                         " | ".join(f"{s}={c}" for s, c in _fund_sources.items()))
@@ -252,7 +270,7 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         import json as _json
         _vcp_rejections: dict[str, int] = {}   # rejection reason bucket → count
         _vcp_score_dist: dict[str, int] = {}   # "0-19","20-39",... → count
-        _developing_tickers: list[str] = []    # has base ≥15d, not yet VCP-quality
+        _developing_tickers: list[dict] = []   # has base ≥15d, not yet VCP-quality
         _t0_vcp = time.time()
 
         for ticker, df, tt, rs, fund in fundamentals_passed:
@@ -282,7 +300,19 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                     # Track stocks that have a real base but aren't VCP-quality yet.
                     # These are "in the oven" — watch them daily as they tighten.
                     if (vcp.get("base_days") or 0) >= settings.MIN_BASE_TRADING_DAYS:
-                        _developing_tickers.append(ticker)
+                        _developing_tickers.append({
+                            "ticker": ticker,
+                            "scan_date": today,
+                            "rs_rating": rs,
+                            "tt_score": tt.get("score", 0),
+                            "eps_growth": fund.get("eps_growth_yoy"),
+                            "rev_growth": fund.get("rev_growth_yoy"),
+                            "base_days": vcp.get("base_days", 0),
+                            # num_contractions is in steps even when Step 5 fails early
+                            "contractions": vcp.get("steps", {}).get("num_contractions", 0),
+                            "vcp_score": vcp.get("vcp_score", 0),
+                            "rejection_reason": vcp.get("rejection_reason", ""),
+                        })
 
                 # Add to watchlist/setups if score >= 70 (moderate VCP — setup forming)
                 if vcp["vcp_score"] >= 70:
@@ -477,13 +507,14 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
             logger.info("  VCP score dist: %s",
                         " | ".join(f"{b}:{c}" for b, c in
                                    sorted(_vcp_score_dist.items())))
+        _dev_names = [d["ticker"] for d in _developing_tickers]
         if _developing_tickers:
             logger.info(
                 "  Developing setups (%d with base ≥%dd, not yet VCP-quality): %s%s",
                 len(_developing_tickers),
                 settings.MIN_BASE_TRADING_DAYS,
-                ", ".join(_developing_tickers[:10]),
-                f" (+{len(_developing_tickers) - 10} more)" if len(_developing_tickers) > 10 else "",
+                ", ".join(_dev_names[:10]),
+                f" (+{len(_dev_names) - 10} more)" if len(_dev_names) > 10 else "",
             )
         else:
             logger.info("  Developing setups: 0 (all %d fund-pass stocks have base < %dd"
@@ -494,6 +525,16 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
 
         # Log scan funnel to DB
         _log_scan_funnel(scan_funnel, elapsed)
+
+        # Persist per-stage ticker data so the Scan Funnel dashboard page can
+        # show exactly which stocks cleared each stage of the pipeline.
+        try:
+            from database.db import save_scan_funnel_stage
+            save_scan_funnel_stage("trend_template", _tt_funnel_data)
+            save_scan_funnel_stage("fundamentals", _fund_funnel_data)
+            save_scan_funnel_stage("developing_vcp", _developing_tickers)
+        except Exception as _fe:
+            logger.debug("Scan funnel stage save failed (non-fatal): %s", _fe)
 
     except Exception as exc:
         logger.error("Full scan crashed: %s", exc, exc_info=True)

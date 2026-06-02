@@ -138,6 +138,25 @@ CREATE TABLE IF NOT EXISTS system_status (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Scan funnel detail table: which tickers cleared each pipeline stage in the
+-- most-recent scan.  Replaces the previous data on every scan so the view is
+-- always current.  Stage values: 'trend_template', 'fundamentals', 'developing_vcp'.
+-- The 'watchlist' stage is already in the watchlist table.
+CREATE TABLE IF NOT EXISTS scan_funnel_tickers (
+    stage            TEXT NOT NULL,
+    ticker           TEXT NOT NULL,
+    scan_date        TEXT NOT NULL,
+    rs_rating        REAL,
+    tt_score         INTEGER,
+    eps_growth       REAL,
+    rev_growth       REAL,
+    base_days        INTEGER,
+    contractions     INTEGER,
+    vcp_score        INTEGER,
+    rejection_reason TEXT,
+    PRIMARY KEY (stage, ticker)
+);
+
 -- Indexes for frequent queries
 CREATE INDEX IF NOT EXISTS idx_signals_ticker_date ON signals(ticker, date);
 CREATE INDEX IF NOT EXISTS idx_watchlist_vcp ON watchlist(vcp_score DESC);
@@ -145,6 +164,7 @@ CREATE INDEX IF NOT EXISTS idx_setups_ticker_date ON setups(ticker, date);
 CREATE INDEX IF NOT EXISTS idx_setups_status ON setups(status);
 CREATE INDEX IF NOT EXISTS idx_cache_key ON cache(key);
 CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
+CREATE INDEX IF NOT EXISTS idx_funnel_stage ON scan_funnel_tickers(stage);
 """
 
 
@@ -194,6 +214,16 @@ def db_session():
 # Add new columns here whenever the schema grows; never remove old entries.
 # ---------------------------------------------------------------------------
 _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "scan_funnel_tickers": [
+        ("rs_rating",        "REAL"),
+        ("tt_score",         "INTEGER"),
+        ("eps_growth",       "REAL"),
+        ("rev_growth",       "REAL"),
+        ("base_days",        "INTEGER"),
+        ("contractions",     "INTEGER"),
+        ("vcp_score",        "INTEGER"),
+        ("rejection_reason", "TEXT"),
+    ],
     "watchlist": [
         ("grade",               "TEXT"),
         ("entry_price",         "REAL"),
@@ -372,6 +402,52 @@ def clear_scan_trigger() -> None:
             "INSERT OR REPLACE INTO system_status(key, value, updated_at) "
             "VALUES('scan_trigger', 'done', CURRENT_TIMESTAMP)"
         )
+
+
+def save_scan_funnel_stage(stage: str, rows: list[dict]) -> None:
+    """
+    Replace all rows for one scan-pipeline stage with fresh data from the latest
+    scan.  The full previous set for this stage is deleted first so stale tickers
+    (stocks that dropped out of this stage since the last run) are not shown.
+
+    Args:
+        stage: 'trend_template', 'fundamentals', or 'developing_vcp'
+        rows:  List of dicts with keys: ticker, scan_date, rs_rating, tt_score,
+               eps_growth, rev_growth, base_days, contractions, vcp_score,
+               rejection_reason  (all optional except ticker + scan_date)
+    """
+    with db_session() as conn:
+        conn.execute("DELETE FROM scan_funnel_tickers WHERE stage=?", (stage,))
+        for r in rows:
+            conn.execute(
+                "INSERT INTO scan_funnel_tickers "
+                "(stage, ticker, scan_date, rs_rating, tt_score, eps_growth, "
+                "rev_growth, base_days, contractions, vcp_score, rejection_reason) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    stage,
+                    r["ticker"],
+                    r.get("scan_date", ""),
+                    r.get("rs_rating"),
+                    r.get("tt_score"),
+                    r.get("eps_growth"),
+                    r.get("rev_growth"),
+                    r.get("base_days"),
+                    r.get("contractions"),
+                    r.get("vcp_score"),
+                    r.get("rejection_reason"),
+                ),
+            )
+
+
+def get_scan_funnel_stage(stage: str) -> list[dict]:
+    """Return all tickers for a given scan stage, ordered by RS rating descending."""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM scan_funnel_tickers WHERE stage=? ORDER BY rs_rating DESC",
+            (stage,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 if __name__ == "__main__":
