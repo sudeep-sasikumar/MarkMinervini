@@ -252,6 +252,7 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         import json as _json
         _vcp_rejections: dict[str, int] = {}   # rejection reason bucket → count
         _vcp_score_dist: dict[str, int] = {}   # "0-19","20-39",... → count
+        _developing_tickers: list[str] = []    # has base ≥15d, not yet VCP-quality
         _t0_vcp = time.time()
 
         for ticker, df, tt, rs, fund in fundamentals_passed:
@@ -278,6 +279,10 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
                 if not vcp["watchlist_candidate"]:
                     _rej = (vcp.get("rejection_reason") or f"score={_vscore}<70")[:55]
                     _vcp_rejections[_rej] = _vcp_rejections.get(_rej, 0) + 1
+                    # Track stocks that have a real base but aren't VCP-quality yet.
+                    # These are "in the oven" — watch them daily as they tighten.
+                    if (vcp.get("base_days") or 0) >= settings.MIN_BASE_TRADING_DAYS:
+                        _developing_tickers.append(ticker)
 
                 # Add to watchlist/setups if score >= 70 (moderate VCP — setup forming)
                 if vcp["vcp_score"] >= 70:
@@ -472,6 +477,18 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
             logger.info("  VCP score dist: %s",
                         " | ".join(f"{b}:{c}" for b, c in
                                    sorted(_vcp_score_dist.items())))
+        if _developing_tickers:
+            logger.info(
+                "  Developing setups (%d with base ≥%dd, not yet VCP-quality): %s%s",
+                len(_developing_tickers),
+                settings.MIN_BASE_TRADING_DAYS,
+                ", ".join(_developing_tickers[:10]),
+                f" (+{len(_developing_tickers) - 10} more)" if len(_developing_tickers) > 10 else "",
+            )
+        else:
+            logger.info("  Developing setups: 0 (all %d fund-pass stocks have base < %dd"
+                        " — market at highs, no consolidation yet)",
+                        scan_funnel["fundamentals"], settings.MIN_BASE_TRADING_DAYS)
         logger.info("=" * 60)
         # ────────────────────────────────────────────────────────────────────
 

@@ -203,6 +203,7 @@ def _run_single_window(
     """
     from screening.trend_template import check_trend_template
     from patterns.vcp_detector import detect_vcp
+    from screening.rs_calculator import check_rs_line_new_high
 
     # Build period-filtered price data (data available up to end of test window)
     period_data = {}
@@ -373,7 +374,18 @@ def _run_single_window(
             # impossible → 0 trades every run.  Instead compute resistance from the
             # prior PIVOT_ZONE_DAYS bars (excluding today) so a genuine close above
             # prior resistance is detectable.
-            vcp = detect_vcp(ticker, avail, trend_template_passes=True)
+            #
+            # SCORING BUG FIX: must pass rs_line_new_high — without it the max
+            # achievable score is 65 (all-vol 25 + very-tight ATR 35 + PP 5),
+            # which is below the watchlist_candidate threshold of 70 unless a
+            # breakout bonus (+5) also fires simultaneously. With the +10 RS
+            # bonus, 70 is reachable from just all-vol + very-tight-ATR + RS,
+            # giving the backtest realistic entry opportunities in the 2022–2024
+            # bear/recovery period.
+            spy_avail = spy_df.loc[:current_date]
+            rs_line_nh = check_rs_line_new_high(avail, spy_avail)
+            vcp = detect_vcp(ticker, avail, trend_template_passes=True,
+                             rs_line_new_high=rs_line_nh)
             if not vcp.get("watchlist_candidate", False):
                 # Sample unique rejection reasons (printed to stdout for dashboard visibility)
                 reason = vcp.get("rejection_reason") or f"score={vcp.get('vcp_score',0)} < 70"
