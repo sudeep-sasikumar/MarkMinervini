@@ -56,6 +56,9 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
     _step_times: dict[str, float] = {}   # step_name → elapsed seconds
 
     try:
+        # today is used across multiple steps and in funnel data captures
+        today = date.today().isoformat()
+
         # --- Step 1: Universe + price data ---
         from screening.universe import get_universe
         from data.fetcher import fetch_ohlcv_batch, fetch_spy_ohlcv
@@ -256,7 +259,6 @@ def run_full_scan(test_mode: bool = False) -> list[dict]:
         if dd_warning:
             send_message(dd_warning)
 
-        today = date.today().isoformat()
         scan_funnel = {
             "universe": len(universe),
             "price_data": len(price_data),
