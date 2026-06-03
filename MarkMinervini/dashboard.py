@@ -803,9 +803,38 @@ elif page == "🇮🇳 India":
         "Scan runs daily at 11:30 BST (30 min after NSE closes)."
     )
 
+    import json as _india_json_db
     from database.db import get_india_scan_funnel_stage
 
-    # --- Load India data ---
+    # --- Load India regime status (stored on every scan, even when 0 stocks pass) ---
+    _ic_reg = get_connection()
+    _india_regime_row = _ic_reg.execute(
+        "SELECT value, updated_at FROM system_status WHERE key='india_regime'"
+    ).fetchone()
+    _ic_reg.close()
+    _india_regime = _india_json_db.loads(_india_regime_row["value"]) if _india_regime_row else {}
+
+    # --- Regime banner (always show if a scan has ever run) ---
+    if _india_regime:
+        _nifty_c   = _india_regime.get("nifty_close", 0)
+        _nifty_s200 = _india_regime.get("nifty_sma200", 0)
+        _india_sig_ok = _india_regime.get("signals_allowed", True)
+        _regime_ts  = (_india_regime_row["updated_at"] or "")[:10]
+        if _india_sig_ok:
+            st.success(
+                f"🟢 **India Regime: BULLISH** — Nifty50 ₹{_nifty_c:,.0f} is **above** its "
+                f"200-SMA (₹{_nifty_s200:,.0f}). Signals active. *(as of {_regime_ts})*"
+            )
+        else:
+            _pct_below = (_nifty_s200 - _nifty_c) / _nifty_s200 * 100 if _nifty_s200 > 0 else 0
+            st.warning(
+                f"🔴 **India Regime: BEARISH** — Nifty50 ₹{_nifty_c:,.0f} is "
+                f"**{_pct_below:.1f}% below** its 200-SMA (₹{_nifty_s200:,.0f}). "
+                f"New entry signals suppressed. System continues scanning to identify "
+                f"setups forming ahead of the next bull phase. *(as of {_regime_ts})*"
+            )
+
+    # --- Load India funnel data ---
     india_tt   = get_india_scan_funnel_stage("trend_template")
     india_fund = get_india_scan_funnel_stage("fundamentals")
     india_dev  = get_india_scan_funnel_stage("developing_vcp")
@@ -819,14 +848,18 @@ elif page == "🇮🇳 India":
     india_scan_date = india_tt[0]["scan_date"] if india_tt else None
     _ic.close()
 
-    if not india_tt and not india_dev:
+    # Determine whether an India scan has ever run (regime row is the canonical indicator)
+    _india_scan_ran = bool(_india_regime)
+
+    if not _india_scan_ran:
         st.info(
             "No India scan data yet. The India scan runs automatically at **11:30 BST** "
             "on weekdays after NSE closes. You can also trigger it manually using the "
             "**🔍 Run Full Scan Now** sidebar button (this will run both US and India scans)."
         )
     else:
-        st.markdown(f"**Last India scan:** {india_scan_date or '—'}")
+        if india_scan_date:
+            st.markdown(f"**Last India scan:** {india_scan_date}")
         st.markdown("---")
 
         # Pipeline overview
@@ -860,6 +893,13 @@ elif page == "🇮🇳 India":
                 _df["RS Rating"] = _df["RS Rating"].apply(lambda x: f"{x:.1f}" if x else "—")
                 st.dataframe(_df.sort_values("RS Rating", ascending=False),
                              use_container_width=True, hide_index=True)
+            elif _india_scan_ran and not _india_regime.get("signals_allowed", True):
+                st.info(
+                    "**0 stocks pass the Trend Template** in the current bearish NSE market. "
+                    "In a downtrend, most stocks fail criteria C3 (price > SMA200), "
+                    "C4 (SMA200 rising), and C5 (SMA50 > SMA150 > SMA200). "
+                    "The system will automatically find setups when Nifty50 recovers above its 200-SMA."
+                )
             else:
                 st.info("No data — run a scan.")
 
@@ -917,7 +957,10 @@ elif page == "🇮🇳 India":
                         + ", ".join(d["ticker"] for d in _near)
                     )
             else:
-                st.info("No developing India setups — all passing stocks still in uptrend (base < 15 days).")
+                if _india_scan_ran and not _india_regime.get("signals_allowed", True):
+                    st.info("No developing India setups — in a bearish market, stocks fail the Trend Template before reaching VCP analysis.")
+                else:
+                    st.info("No developing India setups — all passing stocks still in uptrend (no base formed yet).")
 
         with tab_wl:
             st.subheader(f"India Watchlist — VCP score ≥ 70 ({india_wl_count} stocks)")

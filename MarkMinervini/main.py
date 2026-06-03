@@ -629,6 +629,8 @@ def run_india_scan() -> list[dict]:
 
         # Simple India regime: Nifty 50 above its 200-SMA = signals allowed
         india_signals_allowed = True
+        nifty_close = 0.0
+        nifty_sma200 = 0.0
         if nifty_df is not None and len(nifty_df) >= 200:
             nifty_close = float(nifty_df["Close"].iloc[-1])
             nifty_sma200 = float(nifty_df["Close"].rolling(200).mean().iloc[-1])
@@ -636,6 +638,27 @@ def run_india_scan() -> list[dict]:
             logger.info("India regime: Nifty50=%.0f SMA200=%.0f signals=%s",
                         nifty_close, nifty_sma200,
                         "ALLOWED" if india_signals_allowed else "SUPPRESSED")
+
+        # Save India regime data for the dashboard so it shows the regime
+        # banner even when the scan finds 0 stocks (e.g. bearish NSE).
+        import json as _india_json
+        try:
+            from database.db import db_session as _india_dbs
+            with _india_dbs() as _s:
+                _s.execute(
+                    "INSERT OR REPLACE INTO system_status(key, value, updated_at) "
+                    "VALUES('india_regime', ?, CURRENT_TIMESTAMP)",
+                    (_india_json.dumps({
+                        "nifty_close": nifty_close,
+                        "nifty_sma200": nifty_sma200,
+                        "signals_allowed": india_signals_allowed,
+                        "universe_count": len(universe),
+                        "price_data_count": len(price_data),
+                        "rs_map_count": len(rs_map),
+                    }),),
+                )
+        except Exception as _re:
+            logger.debug("India regime DB save failed (non-fatal): %s", _re)
 
         # --- Trend Template ---
         india_tt_passed: list[tuple] = []

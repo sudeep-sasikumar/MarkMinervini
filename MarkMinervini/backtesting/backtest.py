@@ -347,8 +347,28 @@ def _run_single_window(
 
         rs_pct = _rs_pct
 
+        # Pre-compute spy_avail ONCE per day (used for regime gate + RS line check).
+        # Previously this was inside the ticker loop — recomputed for every ticker.
+        spy_avail = spy_df.loc[:current_date]
+
         # ---------------------------------------------------------------
-        # 4. Screen each ticker for a new entry signal
+        # 4. Regime gate — block new entries when SPY < 200-SMA.
+        #
+        #    The live system suppresses all entry signals whenever the
+        #    market regime is BEAR (SPY below 200-SMA).  Without this gate,
+        #    the backtest enters bear-market bounces (Jul–Dec 2022) that
+        #    quickly hit stops → artificially poor win rates and distorted
+        #    metrics.  Exits and MTM recording are NOT affected.
+        # ---------------------------------------------------------------
+        if len(spy_avail) >= 200:
+            _spy_c   = float(spy_avail["Close"].iloc[-1])
+            _spy_s200 = float(spy_avail["Close"].rolling(200).mean().iloc[-1])
+            if _spy_c < _spy_s200:
+                equity_series[current_date] = _mark_to_market()
+                continue  # no new entries while SPY below 200-SMA
+
+        # ---------------------------------------------------------------
+        # 5. Screen each ticker for a new entry signal
         # ---------------------------------------------------------------
         _diag["days"] += 1
         for ticker, df in period_data.items():
@@ -382,8 +402,7 @@ def _run_single_window(
             # bonus, 70 is reachable from just all-vol + very-tight-ATR + RS,
             # giving the backtest realistic entry opportunities in the 2022–2024
             # bear/recovery period.
-            spy_avail = spy_df.loc[:current_date]
-            rs_line_nh = check_rs_line_new_high(avail, spy_avail)
+            rs_line_nh = check_rs_line_new_high(avail, spy_avail)  # spy_avail pre-computed above
             vcp = detect_vcp(ticker, avail, trend_template_passes=True,
                              rs_line_new_high=rs_line_nh)
             if not vcp.get("watchlist_candidate", False):
@@ -443,7 +462,7 @@ def _run_single_window(
             break  # one new entry per day to avoid look-ahead cascade
 
         # ---------------------------------------------------------------
-        # 5. Record daily portfolio value (cash + open position MTM)
+        # 6. Record daily portfolio value (cash + open position MTM)
         # ---------------------------------------------------------------
         equity_series[current_date] = _mark_to_market()
 

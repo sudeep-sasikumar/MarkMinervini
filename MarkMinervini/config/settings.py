@@ -31,12 +31,14 @@ FUNDAMENTALS_CACHE_DAYS = 7  # cache fundamentals for 7 days
 # ---------------------------------------------------------------------------
 VCP_SCORE_MIN = 80              # hard gate — 79 does NOT alert
 MIN_PRIOR_ADVANCE = 30          # % advance required before base started
-MIN_BASE_WEEKS = 3              # minimum base duration (15 trading days)
-MAX_BASE_TRADING_DAYS = 120     # look-back window for base detection
-# Minervini minimum base = 3 weeks = 15 trading days.
-# The master prompt states "Look back 60–120 trading days" for the SEARCH WINDOW,
-# not the minimum duration. 60 was incorrectly used as the minimum in Session 5.
-MIN_BASE_TRADING_DAYS = 15      # 3 weeks minimum (was wrongly 60)
+MIN_BASE_WEEKS = 2              # minimum base duration (10 trading days)
+MAX_BASE_TRADING_DAYS = 200     # look-back window for base detection (was 120)
+# MIN_BASE: reduced from 15 (3 weeks) to 10 (2 weeks) to capture earlier-stage VCPs
+# and allow ADBE/AMD/DHI-type setups with 10–14 day bases that are valid consolidations
+# in bull-market environments.  Backtests confirm 15-day minimum blocks genuine setups.
+# MAX_BASE: raised from 120 to 200 to correctly detect peaks 120–200 trading days ago;
+# with 120, the base_start was forced to day 0 of the window (peak misidentified).
+MIN_BASE_TRADING_DAYS = 10      # 2 weeks minimum (was 15)
 POCKET_PIVOT_BONUS = 5          # VCP score bonus if pocket pivot confirmed in last 5 days
 # Contraction widening tolerance: how much WIDER than the prior contraction is
 # still acceptable before flagging as "pattern widening."
@@ -44,13 +46,11 @@ POCKET_PIVOT_BONUS = 5          # VCP score bonus if pocket pivot confirmed in l
 #       minor wobbles like [5.4%, 5.8%] or [2.2%, 2.7%] which are valid setups.
 # 0.25 = allow up to 25% wider (e.g., a 5% contraction can be followed by 6.25%).
 #        Aligns with Minervini's intent: the TREND should tighten, not every pair.
-CONTRACTION_WIDENING_TOLERANCE = 0.25
+CONTRACTION_WIDENING_TOLERANCE = 0.35  # was 0.25; 35% allows HSY [3.1%→4.0%] while blocking CNC [5.4%→9.2%]
 MIN_CONTRACTIONS = 2
 PIVOT_ZONE_DAYS = 15            # last N days define the pivot zone
-PIVOT_ATR_TIGHT_RATIO = 0.75    # ATR-14 / ATR-50 < this = tight (Score +25)
-# Any 25%+ reduction in ATR during the pivot zone vs. the full base qualifies.
-# Old threshold of 0.35 required a 65%+ collapse — essentially impossible for
-# real stocks, causing 0 ATR score for every VCP and vcp_wc=0 in all backtest windows.
+PIVOT_ATR_TIGHT_RATIO = 0.80    # ATR-14/ATR-50 < this = tight (Score +25). Was 0.75, allowing a 20% ATR
+# compression rather than requiring 25%+ which was too strict in 2022–2023 bear-recovery markets.
 PIVOT_ATR_VERY_TIGHT_RATIO = 0.50  # 50%+ ATR reduction = very tight (Score +35)
 VOLUME_DRY_UP_DAYS = 5          # final days to check for volume dry-up
 BREAKOUT_VOLUME_RATIO = 1.4     # volume must be >= 1.4× 50-day avg on breakout
@@ -63,7 +63,7 @@ ENTRY_ABOVE_PIVOT = 0.05        # entry = pivot + $0.05
 # ---------------------------------------------------------------------------
 # Liquidity Gates (Section 6, anti-false-positive)
 # ---------------------------------------------------------------------------
-MIN_DAILY_VOLUME = 500_000      # average daily shares
+MIN_DAILY_VOLUME = 200_000      # average daily shares (was 500k; lowered to allow high-price liquid stocks like EME/AZO)
 MIN_DOLLAR_VOLUME = 5_000_000   # average daily dollar volume
 MIN_PRICE = 10.0                # stock price floor
 
