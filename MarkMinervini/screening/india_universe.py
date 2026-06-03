@@ -106,7 +106,8 @@ _BSE_SMALLCAP_EXTRA: list[str] = [
 # ---------------------------------------------------------------------------
 _NIFTY500_EXTENSION: list[str] = [
     # IT & Software
-    "LTIM.NS", "OFSS.NS", "MPHASIS.NS", "CYIENT.NS",
+    # LTIM.NS is wrong — post-merger ticker is LTIMINDTREE.NS (L&T Infotech + Mindtree, Nov 2022)
+    "LTIMINDTREE.NS", "OFSS.NS", "MPHASIS.NS", "CYIENT.NS",
     "TATAELXSI.NS", "KPITTECH.NS",
     # Pharma & Healthcare
     "AUROPHARMA.NS", "ALKEM.NS", "BIOCON.NS", "GLAND.NS", "LALPATHLAB.NS",

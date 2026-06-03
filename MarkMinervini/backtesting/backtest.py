@@ -466,12 +466,44 @@ def _run_single_window(
         # ---------------------------------------------------------------
         equity_series[current_date] = _mark_to_market()
 
+    # ---------------------------------------------------------------
+    # End-of-window cleanup: force-close all positions still open.
+    #
+    # Positions entered late in the test window may not have hit their
+    # 8% stop or the 126-day time exit before the window boundary.
+    # Silently dropping them biases the sample: in the 2022–2024 backtest
+    # run, 5 of 10 entries were dropped (50% of outcomes invisible).
+    #
+    # Fix: mark-to-market exit at the final window day's close with
+    # normal 0.2% slippage.  This gives the same fair exit a live trader
+    # would get if they reviewed positions at each 6-month checkpoint.
+    # ---------------------------------------------------------------
+    _window_end_closed = 0
+    if open_positions:
+        _last_date = spy_period.index[-1]
+        for _ticker, _pos in list(open_positions.items()):
+            _df = period_data.get(_ticker)
+            if _df is not None:
+                _sub = _df.loc[:_last_date]
+                if len(_sub) > 0:
+                    _exit_price = round(float(_sub["Close"].iloc[-1]) * (1 - SLIPPAGE), 4)
+                    _pnl_pct = (_exit_price - _pos["entry"]) / _pos["entry"] * 100
+                    equity += _pos["shares"] * _exit_price
+                    trade_returns.append(_pnl_pct)
+                    _window_end_closed += 1
+        open_positions.clear()
+    if _window_end_closed:
+        logger.info(
+            "Window end: force-closed %d open position(s) at mark-to-market",
+            _window_end_closed,
+        )
+
     # Log diagnostic stats for this window so filter bottlenecks are visible
     logger.info(
-        "Window %s→%s | days=%d | tt_pass=%d | vcp_wc=%d | breakout=%d | entries=%d | trades=%d",
+        "Window %s→%s | days=%d | tt_pass=%d | vcp_wc=%d | breakout=%d | entries=%d | trades=%d (window-end closes=%d)",
         start.date(), end.date(),
         _diag["days"], _diag["tt_pass"], _diag["vcp_wc"], _diag["breakout"],
-        _diag["entries"], len(trade_returns),
+        _diag["entries"], len(trade_returns), _window_end_closed,
     )
     # Print rejection samples to STDOUT (captured separately by dashboard subprocess)
     # so they appear in the "Full error + traceback" panel even on success.
@@ -479,7 +511,7 @@ def _run_single_window(
         f"\n[DIAG] Window {start.date()}→{end.date()} "
         f"days={_diag['days']} tt_pass={_diag['tt_pass']} "
         f"vcp_wc={_diag['vcp_wc']} breakout={_diag['breakout']} "
-        f"entries={_diag['entries']} trades={len(trade_returns)}",
+        f"entries={_diag['entries']} trades={len(trade_returns)} open_closed={_window_end_closed}",
         flush=True,
     )
     if _rejection_samples:

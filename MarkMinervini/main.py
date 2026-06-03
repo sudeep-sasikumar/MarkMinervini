@@ -1170,6 +1170,11 @@ def main():
             "regime:latest", "sector:performance",
             "breadth:sp500_above_200sma", "vix:latest",
             "ohlcv:SPY:2y", "ohlcv:QQQ:2y",
+            # India universe: force rebuild from hardcoded list on every deploy.
+            # The DB volume persists across container restarts, so a cached universe
+            # built from a pre-fix version (e.g. wrong/delisted tickers) would
+            # otherwise survive indefinitely — even after india_universe.py is fixed.
+            "universe:india",
         )
         for _k in _stale_keys:
             _cache_delete(_k)
