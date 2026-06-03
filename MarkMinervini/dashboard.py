@@ -1346,11 +1346,11 @@ elif page == "📊 Backtest Results":
     )
 
     if st.button("▶️ Run Backtest (may take several minutes)"):
-        with st.spinner("Running backtest... (may take 5–15 min depending on data availability)"):
+        with st.spinner("Running backtest... (may take 10–25 min for 7 windows covering 2022–2026)"):
             try:
                 result = subprocess.run(
                     [sys.executable, "-m", "backtesting.backtest"],
-                    capture_output=True, text=True, timeout=600,
+                    capture_output=True, text=True, timeout=1800,  # 30 min (was 600/10 min)
                     cwd=os.path.dirname(__file__),
                 )
                 stdout_out = (result.stdout or "").strip()
@@ -1385,8 +1385,12 @@ elif page == "📊 Backtest Results":
                     else:
                         st.warning("No output captured — process may have been killed by OOM.")
             except subprocess.TimeoutExpired:
-                st.error("Backtest timed out (>10 min) — process killed.")
-                st.info("Try reducing BACKTEST_END in settings.py or check VPS memory (docker stats).")
+                st.error("Backtest timed out (>30 min) — process killed.")
+                st.info(
+                    "With BACKTEST_END=2026-01-01 (7 windows) this can take 20–25 min. "
+                    "If it consistently times out, reduce to BACKTEST_END=2025-01-01 (5 windows) "
+                    "in config/settings.py, or check VPS memory (docker stats)."
+                )
             except Exception as e:
                 st.error(f"Error launching backtest subprocess: {e}")
 

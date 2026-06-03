@@ -53,13 +53,18 @@ def run_backtest() -> dict:
         sp500 = get_sp500_tickers()
         logger.info("Fetching price data for %d S&P 500 tickers (this takes a while)...", len(sp500))
 
-        # Use "max" to ensure we have data covering the full backtest period
-        # (BACKTEST_START is 2015; we need data from ~2013 for the 18-month
-        # training window + 252-day RS lookback).
-        price_data = fetch_ohlcv_batch(sp500, period="max")
+        # Use "7y" — covers back to ~2019, sufficient for BACKTEST_START=2021-01-01.
+        # Rationale: the first test window (2022-07-01) needs 252 trading days of
+        # RS history before it, i.e. back to ~2021-08.  "7y" from today (2026)
+        # = 2019, giving a comfortable 2-year buffer.
+        #
+        # Previously "max" downloaded 20+ years per ticker (unnecessary with a 2021
+        # start), causing ~5–8 min of extra download time and larger DataFrames in
+        # the inner per-day loop — the primary driver of the >10 min timeout.
+        price_data = fetch_ohlcv_batch(sp500, period="7y")
         logger.info("Fetched %d tickers with sufficient history", len(price_data))
 
-        spy_df = fetch_ohlcv("SPY", period="max")
+        spy_df = fetch_ohlcv("SPY", period="7y")
         if spy_df is None:
             raise ValueError("Could not fetch SPY data")
 

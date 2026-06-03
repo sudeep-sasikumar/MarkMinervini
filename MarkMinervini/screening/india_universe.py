@@ -211,27 +211,44 @@ def get_india_universe() -> list[str]:
 
 def _try_fetch_nifty500_from_nse() -> Optional[list[str]]:
     """
-    Attempt to fetch Nifty 500 constituents from NSE's public CSV endpoint.
-    Returns list of '.NS' tickers, or None on any failure.
+    Attempt to fetch Nifty 500 constituents.  Tries three endpoints in order:
 
-    NSE blocks cloud IPs with a Cloudflare cookie wall; this will usually
-    fail in production Docker containers.
+    1. NSE JSON API  — requires cookie/session, always blocked on cloud IPs.
+    2. NSE archives CSV  — public S3-backed file, no cookie required.
+       URL: https://archives.nseindia.com/content/indices/ind_nifty500list.csv
+    3. niftyindices.com CSV  — IISL (NSE subsidiary) public CDN, also cookieless.
+       URL: https://www.niftyindices.com/IndexConstituents/ind_nifty500list.csv
+
+    The CSV format (all sources):
+        Company Name, Industry, Symbol, Series, ISIN Code
+    We extract the 'Symbol' column and append '.NS'.
+
+    Returns list of '.NS' tickers (≥100 entries), or None on all failures.
     """
+    import csv as _csv
+    import io as _io
+
+    _BROWSER_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+    _headers = {
+        "User-Agent": _BROWSER_UA,
+        "Accept": "*/*",
+        "Referer": "https://www.nseindia.com/",
+    }
+
+    # ------------------------------------------------------------------
+    # Attempt 1: JSON API (requires NSE session cookie — usually blocked)
+    # ------------------------------------------------------------------
     try:
-        url = (
-            "https://www.nseindia.com/api/equity-stockIndices"
-            "?index=NIFTY%20500"
+        json_url = (
+            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500"
         )
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com/",
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(
+            json_url, headers={**_headers, "Accept": "application/json"}, timeout=10
+        )
         resp.raise_for_status()
         data = resp.json()
         symbols = [
@@ -239,9 +256,53 @@ def _try_fetch_nifty500_from_nse() -> Optional[list[str]]:
             for row in data.get("data", [])
             if row.get("symbol") and _is_valid_ns_ticker(row["symbol"] + ".NS")
         ]
-        if len(symbols) < 100:
-            raise ValueError(f"Only {len(symbols)} symbols returned — likely blocked")
-        return symbols
+        if len(symbols) >= 100:
+            logger.info("NSE JSON API: fetched %d Nifty 500 symbols", len(symbols))
+            return symbols
+        logger.debug("NSE JSON API: only %d symbols — likely blocked", len(symbols))
     except Exception as exc:
-        logger.debug("NSE Nifty 500 fetch failed (will use fallback): %s", exc)
-        return None
+        logger.debug("NSE JSON API failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Attempts 2 & 3: Public CSV archives (no cookie required)
+    # ------------------------------------------------------------------
+    _CSV_URLS = [
+        "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+        "https://www.niftyindices.com/IndexConstituents/ind_nifty500list.csv",
+    ]
+    for csv_url in _CSV_URLS:
+        try:
+            resp = requests.get(csv_url, headers=_headers, timeout=15)
+            resp.raise_for_status()
+
+            # The CSV is UTF-8; sometimes has a BOM
+            text = resp.content.decode("utf-8-sig").strip()
+            reader = _csv.DictReader(_io.StringIO(text))
+
+            # Header may be 'Symbol' or ' Symbol' (leading space) — normalise
+            symbols = []
+            for row in reader:
+                # Find the Symbol key case-insensitively, stripping whitespace
+                sym = next(
+                    (v.strip() for k, v in row.items()
+                     if k.strip().lower() == "symbol" and v.strip()),
+                    None
+                )
+                if sym and _is_valid_ns_ticker(sym + ".NS"):
+                    symbols.append(sym + ".NS")
+
+            if len(symbols) >= 100:
+                logger.info(
+                    "NSE archives CSV (%s): fetched %d Nifty 500 symbols",
+                    csv_url.split("/")[-1], len(symbols),
+                )
+                return symbols
+            logger.debug(
+                "NSE CSV %s returned only %d symbols",
+                csv_url, len(symbols),
+            )
+        except Exception as exc:
+            logger.debug("NSE CSV fetch failed (%s): %s", csv_url, exc)
+
+    logger.debug("All NSE Nifty 500 fetch attempts failed — using hardcoded fallback")
+    return None
