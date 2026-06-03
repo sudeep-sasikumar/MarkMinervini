@@ -72,6 +72,31 @@ def compute_rs_ratings(
 
     closes = pd.concat(eligible, axis=1)
 
+    # Drop rows that are entirely NaN across ALL columns.
+    #
+    # Root cause (confirmed in India scan logs 2026-06-03):
+    #   pd.concat with axis=1 uses outer join — the UNION of dates from all
+    #   tickers.  NSE stocks occasionally have phantom extra dates (trading
+    #   suspensions, yfinance data artifacts) where only 1 stock has a row
+    #   and all others are NaN.  These phantom rows scatter through the
+    #   combined DataFrame.  When closes.iloc[-252] (integer-position anchor)
+    #   lands on such a row, the valid_mask check fails for EVERY ticker,
+    #   returning an empty RS DataFrame and silently breaking India TT.
+    #
+    # dropna(how='all') removes only rows that are entirely NaN, preserving
+    # rows where at least one ticker has real data.  This ensures iloc[-252]
+    # always lands on an actual trading day.
+    closes = closes.dropna(how='all')
+
+    if len(closes) < 252:
+        logger.warning(
+            "RS: combined price DataFrame has only %d rows after removing phantom "
+            "all-NaN rows (need ≥252 for quarterly anchors). "
+            "Reduce universe size or fetch more history.",
+            len(closes),
+        )
+        return pd.DataFrame(columns=["ticker", "rs_raw", "rs_rating"])
+
     # Quarterly boundary prices (vectorised — one row access each)
     p0   = closes.iloc[-1]    # today
     p63  = closes.iloc[-63]   # ~3 months ago
