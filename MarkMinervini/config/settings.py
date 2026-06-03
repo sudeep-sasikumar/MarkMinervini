@@ -167,7 +167,12 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # Backtesting (Section 14)
 # ---------------------------------------------------------------------------
 BACKTEST_START = "2021-01-01"   # shortened from 2015 — reduces RS computation ~60%
-BACKTEST_END = "2024-12-31"
+BACKTEST_END = "2026-01-01"     # was 2024-12-31; extended to capture 3 more test windows:
+                                 #   W5: 2024-07→2025-01 (H2 2024 AI/tech bull run)
+                                 #   W6: 2025-01→2025-07 (tariff correction + recovery)
+                                 #   W7: 2025-07→2026-01 (post-tariff rally)
+                                 # The loop exits when wf_start+24mo > end; with end=2024-12-31
+                                 # only 4 windows fit, skipping the entire 2024H2-2025 period.
 BACKTEST_MAX_POSITIONS = 10
 BACKTEST_SLIPPAGE = 0.002       # 0.2% slippage on all entries and exits
 BACKTEST_TRAIN_MONTHS = 18
